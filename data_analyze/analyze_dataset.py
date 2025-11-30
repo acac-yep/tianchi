@@ -10,14 +10,25 @@ from collections import Counter
 from pathlib import Path
 import warnings
 import gc
+import sys
+from datetime import datetime
 warnings.filterwarnings('ignore')
 
 # =============================================================================
 # 配置
 # =============================================================================
-DATA_DIR = Path("/home/byhx/workspace/tianchi/data")
+DATA_DIR = Path(__file__).parent.parent / "data"
 TRAIN_PATH = DATA_DIR / "train_set.csv"
 TEST_PATH = DATA_DIR / "test_a.csv"
+
+# 输出文件配置
+OUTPUT_DIR = Path(__file__).parent / "results"
+OUTPUT_DIR.mkdir(exist_ok=True)
+OUTPUT_FILE = OUTPUT_DIR / f"analysis_result_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+
+# 全局输出文件对象
+output_file_handle = None
+original_stdout = None
 
 # 特殊 token 预留 ID（可根据实际情况修改）
 SPECIAL_TOKENS = {
@@ -31,6 +42,54 @@ SPECIAL_TOKENS = {
 # 截断阈值
 TRUNCATION_THRESHOLDS = [256, 512, 1024, 2048, 4096, 8192]
 
+
+# =============================================================================
+# 输出函数（同时输出到终端和文件）
+# =============================================================================
+class TeeOutput:
+    """同时输出到终端和文件的类"""
+    def __init__(self, file_handle):
+        self.file = file_handle
+        self.stdout = sys.stdout
+    
+    def write(self, text):
+        self.stdout.write(text)
+        if self.file is not None:
+            self.file.write(text)
+            self.file.flush()
+    
+    def flush(self):
+        self.stdout.flush()
+        if self.file is not None:
+            self.file.flush()
+
+
+def init_output_file():
+    """初始化输出文件并重定向输出"""
+    global output_file_handle, original_stdout
+    output_file_handle = open(OUTPUT_FILE, 'w', encoding='utf-8')
+    # 保存原始 stdout
+    original_stdout = sys.stdout
+    # 重定向到 TeeOutput
+    sys.stdout = TeeOutput(output_file_handle)
+    print(f"分析结果将保存到: {OUTPUT_FILE}")
+    print("=" * 80)
+    print()
+
+
+def close_output_file():
+    """关闭输出文件并恢复原始输出"""
+    global output_file_handle, original_stdout
+    if output_file_handle is not None:
+        # 恢复原始 stdout
+        if original_stdout is not None:
+            sys.stdout = original_stdout
+        else:
+            sys.stdout = sys.__stdout__
+        output_file_handle.close()
+        output_file_handle = None
+        original_stdout = None
+        print(f"\n分析结果已保存到: {OUTPUT_FILE}")
 
 def load_data():
     """加载数据集"""
@@ -597,37 +656,44 @@ def generate_summary(train_df, test_df, label_counts, train_vocab, test_vocab, t
 
 def main():
     """主函数"""
-    print("\n")
-    print("╔═══════════════════════════════════════════════════════════════════════════╗")
-    print("║                        数据集特征分析工具                                  ║")
-    print("║                    Dataset Feature Analysis Tool                          ║")
-    print("╚═══════════════════════════════════════════════════════════════════════════╝")
-    
-    # 加载数据
-    train_df, test_df = load_data()
-    
-    # 一、分析标签分布
-    label_counts = analyze_label_distribution(train_df)
-    
-    # 二、分析长度分布
-    train_lengths, test_lengths = analyze_length_distribution(train_df, test_df)
-    
-    # 三、分析 token 统计
-    train_vocab, test_vocab, train_token_counts, test_token_counts = analyze_token_statistics_streaming(train_df, test_df)
-    
-    # 四、分析数据质量
-    analyze_data_quality(train_df, test_df, train_lengths, test_lengths)
-    
-    # 五、分析训练测试差异
-    analyze_train_test_difference(train_lengths, test_lengths, train_vocab, test_vocab, train_token_counts, test_token_counts)
-    
-    # 六、运行截断实验
-    run_truncation_experiments(train_df, sample_size=30000)
-    
-    # 生成总结
-    generate_summary(train_df, test_df, label_counts, train_vocab, test_vocab, train_lengths, test_lengths)
-    
-    print("\n分析完成！")
+    try:
+        # 初始化输出文件
+        init_output_file()
+        
+        print("\n")
+        print("╔═══════════════════════════════════════════════════════════════════════════╗")
+        print("║                        数据集特征分析工具                                  ║")
+        print("║                    Dataset Feature Analysis Tool                          ║")
+        print("╚═══════════════════════════════════════════════════════════════════════════╝")
+        
+        # 加载数据
+        train_df, test_df = load_data()
+        
+        # 一、分析标签分布
+        label_counts = analyze_label_distribution(train_df)
+        
+        # 二、分析长度分布
+        train_lengths, test_lengths = analyze_length_distribution(train_df, test_df)
+        
+        # 三、分析 token 统计
+        train_vocab, test_vocab, train_token_counts, test_token_counts = analyze_token_statistics_streaming(train_df, test_df)
+        
+        # 四、分析数据质量
+        analyze_data_quality(train_df, test_df, train_lengths, test_lengths)
+        
+        # 五、分析训练测试差异
+        analyze_train_test_difference(train_lengths, test_lengths, train_vocab, test_vocab, train_token_counts, test_token_counts)
+        
+        # 六、运行截断实验
+        run_truncation_experiments(train_df, sample_size=30000)
+        
+        # 生成总结
+        generate_summary(train_df, test_df, label_counts, train_vocab, test_vocab, train_lengths, test_lengths)
+        
+        print("\n分析完成！")
+    finally:
+        # 确保关闭输出文件
+        close_output_file()
 
 
 if __name__ == "__main__":
