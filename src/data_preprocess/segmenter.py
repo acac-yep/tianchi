@@ -269,8 +269,8 @@ class DocumentSegmenter:
             - 基本不会对训练产生影响（loss 贡献为 0）
         """
         # 空文档：全 padding
-        segment = [self.pad_token_id] * self.segment_length
-        mask = [0] * self.segment_length
+            segment = [self.pad_token_id] * self.segment_length
+            mask = [0] * self.segment_length
         
         return SegmentedDocument(
             segment_ids=[segment],

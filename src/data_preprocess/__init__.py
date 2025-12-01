@@ -58,6 +58,11 @@ from .dataset import (
     load_processed_dataset,
 )
 
+from .preprocess import (
+    DataPreprocessor,
+    run_preprocessing,
+)
+
 
 __all__ = [
     # Config
@@ -101,6 +106,10 @@ __all__ = [
     'load_dataset_from_csv',
     'save_processed_dataset',
     'load_processed_dataset',
+    
+    # Preprocessing
+    'DataPreprocessor',
+    'run_preprocessing',
 ]
 
 
