@@ -112,7 +112,9 @@ class DocumentSegmenter:
         original_length = len(token_ids)
         
         if original_length == 0:
-            # 空文档处理
+            # 空文档处理：理论上在数据清洗阶段已经移除空文本
+            # 这里只作为最后防线，返回一个全 PAD 的 segment
+            # segment_mask 会标记该 segment 为无效，不会影响训练
             return self._create_empty_document()
         
         # Step 1: 按 segment_length 切分
@@ -254,7 +256,18 @@ class DocumentSegmenter:
         return segment_ids, attention_masks, segment_lengths
     
     def _create_empty_document(self) -> SegmentedDocument:
-        """创建空文档的分段结果"""
+        """
+        创建空文档的分段结果
+        
+        理论上在数据清洗阶段已经移除空文本，这里仅为防御性代码。
+        
+        返回:
+            一个全 PAD 的 segment：
+            - segment_ids: [[PAD, PAD, ..., PAD]]  形状 [1, K]
+            - segment_attention_masks: [[0, 0, ..., 0]]  形状 [1, K]
+            - 在 DataCollator 中 segment_mask 会是 [0]（无效 segment）
+            - 基本不会对训练产生影响（loss 贡献为 0）
+        """
         # 空文档：全 padding
         segment = [self.pad_token_id] * self.segment_length
         mask = [0] * self.segment_length

@@ -224,7 +224,6 @@ class HATTokenizer:
                 'original_max_id': self.config.original_max_id,
                 'id_offset': self.config.id_offset,
                 'vocab_size': self.config.vocab_size,
-                'add_segment_cls': self.config.add_segment_cls,
             },
             'special_tokens': self.special_tokens.to_dict()
         }

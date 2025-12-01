@@ -28,8 +28,13 @@ num_labels = COMMON_CONFIG.num_labels           # 14
 | `id_offset` | 5 | Token ID 偏移量 |
 | `segment_length` | 512 | 每段 token 数（不含 CLS_SEG） |
 | `max_segments` | 8 | 最大段数 |
-| `max_seq_length` | 4,096 | 最大总长度 |
+| `max_seq_length` | 4,096 | 原始 token 级最大长度（不含 CLS） |
+| `max_model_tokens` | 4,104 | 模型内部总 token 数（含每段 CLS_SEG） |
 | `num_labels` | 14 | 分类类别数 |
+
+**长度关系：**
+- `max_seq_length = segment_length × max_segments = 512 × 8 = 4096`
+- `max_model_tokens = max_segments × (segment_length + 1) = 8 × 513 = 4104`
 
 ### 1.3 特殊 Token ID
 
@@ -37,9 +42,11 @@ num_labels = COMMON_CONFIG.num_labels           # 14
 |-------|-----|------|
 | `[PAD]` | 0 | 填充 |
 | `[UNK]` | 1 | 未知 |
-| `[CLS]` | 2 | CLS_SEG / CLS_DOC |
+| `[CLS]` | 2 | 段级 CLS (CLS_SEG)，文档表示通过所有段 CLS 的 masked 平均得到 |
 | `[SEP]` | 3 | 分隔符 |
 | `[MASK]` | 4 | MLM 掩码 |
+
+> **注意**：当前方案不使用单独的 doc-level CLS token。文档级表示由所有 segment 的 CLS_SEG 向量经 masked 平均得到。
 
 ---
 
@@ -106,6 +113,9 @@ encoded = tokenizer.encode("100 200 300")  # [105, 205, 305]
 | 标签冲突（同文本不同标签） | 全部移除 |
 | 空文本 | 移除 |
 | 超短文本 (< 5 tokens) | 标记（可选移除） |
+
+**空文档处理说明**：
+> 空文本会在数据清洗阶段移除。Segmenter 中的空文档处理逻辑（`_create_empty_document()`）仅为防御性代码，一般不会触发。如果触发，返回一个全 PAD 的 segment，`segment_mask = [0]`，基本不会对训练产生影响。
 
 ### 2.5 类别平衡
 
@@ -180,6 +190,8 @@ labels: [B]                 # 可选
 | 池化后 | `[B, H]` | 文档表示 |
 | 输出 | `[B, 14]` | logits |
 
+### 3.4 Mask 实现约定
+
 **Mask 形状演变：**
 
 | 阶段 | token_mask | segment_mask |
@@ -189,7 +201,22 @@ labels: [B]                 # 可选
 | SWE | `[B*N, K+1]` | - |
 | CSE | - | `[B, N]` |
 
-### 3.4 使用示例
+**Mask 实现方式：**
+
+- **SWE（段内 self-attention）**：
+  - 输入 `token_mask: [B, N, K+1]`，1=有效，0=padding。
+  - 在内部 reshape 为 `[B * N, K+1]`，作为 `key_padding_mask` 使用。
+  
+- **CSE（跨段 self-attention）**：
+  - 输入 `segment_mask: [B, N]`，1=有效，0=padding。
+  - 在内部直接作为 `key_padding_mask: [B, N]` 使用。
+
+> 本设计不使用复杂的 `[B, 1, 1, L]` 形状 `attn_mask`，而是通过 `key_padding_mask` 控制 padding 位置，与 PyTorch / Megatron 的标准实现保持一致。
+
+**segment_mask 生成方式：**
+> HATDataCollator 生成的 `segment_mask: [B, N]` 中，前 `num_segments` 位置为 1（有效段），后续位置为 0（padding 段），在跨段 self-attention 和文档级池化中共同使用。
+
+### 3.5 使用示例
 
 ```python
 from src.model import HATConfig, create_model
@@ -222,20 +249,29 @@ logits = model(input_ids, attention_mask)
 - 其中 10% 保持不变
 
 **不 mask 的位置：**
-- 特殊 token (ID 0~4)
+- PAD、UNK、SEP、MASK token (ID 0, 1, 3, 4)
 - Padding 位置
+- **注意**：不包含 CLS，因为数据预处理阶段不会出现 CLS token
 
 ### 4.2 MLM 模型接口
+
+**接口设计原则：**
+- 外部（预处理 & collator）只知道**原始 512 tokens**，不感知 CLS
+- 模型内部负责插 CLS，并对齐 labels 的维度
 
 ```python
 from src.model import create_mlm_model
 
 mlm_model = create_mlm_model()
 
-# 输入
-input_ids: [B, N, K]        # 包含 [MASK] 的输入
+# 外部 / collator 提供
+input_ids: [B, N, K]        # 包含 [MASK] 的输入，不含 CLS
 attention_mask: [B, N, K]
-mlm_labels: [B, N, K+1]     # -100 表示不计算损失
+mlm_labels: [B, N, K]       # 非 mask 位置为 -100
+
+# 模型内部处理：
+# - 对 mlm_labels 前面 pad 一列 -100，扩展为 [B, N, K+1]
+# - 与 prediction_scores: [B, N, K+1, vocab_size] 对齐
 
 # 输出
 loss, prediction_scores = mlm_model(input_ids, attention_mask, mlm_labels)
@@ -257,6 +293,7 @@ loss, prediction_scores = mlm_model(input_ids, attention_mask, mlm_labels)
 │  Segments [N, K]  (不含 CLS_SEG)                                 │
 │      ↓ HATDataCollator()                                        │
 │  Batch [B, N, K]                                                │
+│  segment_mask [B, N] (前 num_segments 为 1，其余为 0)            │
 └─────────────────────────────────────────────────────────────────┘
                               ↓
 ┌─────────────────────────────────────────────────────────────────┐
@@ -265,9 +302,10 @@ loss, prediction_scores = mlm_model(input_ids, attention_mask, mlm_labels)
 │  input_ids [B, N, K]                                            │
 │      ↓ HATEmbeddings (插入 CLS_SEG)                             │
 │  hidden_states [B, N, K+1, H]                                   │
+│  token_mask [B, N, K+1] (CLS 位置始终为 1)                       │
 │      ↓ HATEncoder (6 × HATLayer)                                │
 │  cls_final [B, N, H]                                            │
-│      ↓ 池化 (mean over segments)                                │
+│      ↓ 池化 (masked mean over segments)                         │
 │  doc_repr [B, H]                                                │
 │      ↓ Classifier                                               │
 │  logits [B, 14]                                                 │
@@ -297,4 +335,5 @@ src/data_preprocess/config.py    src/model/hat_model.py
 3. **类别平衡**：避免同时使用 sampler 和 loss 权重，防止双重补偿
 4. **超长文档**：训练用 random_window，推理用 sliding_window + logits 聚合
 5. **数据清洗顺序**：先清洗再划分 train/val
-
+6. **MLM labels 形状**：外部提供 `[B, N, K]`，模型内部 pad 为 `[B, N, K+1]`
+7. **空文档**：在数据清洗阶段移除，segmenter 的空文档处理仅为防御性代码

@@ -2,6 +2,11 @@
 HAT 预训练模型 - Masked Language Modeling (MLM)
 
 用于在分类任务前对 HAT 模型进行无监督预训练。
+
+输入/输出约定：
+- input_ids: [B, N, K] - 不含 CLS_SEG，由模型在 forward 时添加
+- mlm_labels: [B, N, K] - 不含 CLS，模型内部会 pad 到 [B, N, K+1]
+- prediction_scores: [B, N, K+1, vocab_size] - 含 CLS 位置
 """
 
 from typing import Optional, Tuple, Union
@@ -58,6 +63,11 @@ class HATInterleaved512ForMLM(nn.Module):
     HAT Interleaved 512 预训练模型 (MLM)
     
     用于 Masked Language Modeling 任务的预训练。
+    
+    注意：
+    - 外部（collator）提供的 mlm_labels 形状为 [B, N, K]，不含 CLS
+    - 模型内部会将 mlm_labels 前面 pad 一列 -100，扩展为 [B, N, K+1]
+    - 与 prediction_scores [B, N, K+1, vocab_size] 对齐
     """
     
     def __init__(self, config: HATConfig):
@@ -105,14 +115,39 @@ class HATInterleaved512ForMLM(nn.Module):
         if attention_mask is None:
             return None, None
         
-        # 为 CLS_SEG 位置添加 mask
+        # 为 CLS_SEG 位置添加 mask（CLS 始终有效）
         cls_mask = torch.ones(batch_size, num_segments, 1, dtype=attention_mask.dtype, device=device)
         token_mask = torch.cat([cls_mask, attention_mask], dim=2)
         
-        # segment_mask
+        # segment_mask: 如果一个 segment 的所有 token 都是 padding，则该 segment 无效
         segment_mask = attention_mask.any(dim=2).long()
         
         return token_mask, segment_mask
+    
+    def _pad_mlm_labels(self, mlm_labels: torch.Tensor) -> torch.Tensor:
+        """
+        将 mlm_labels 从 [B, N, K] 扩展为 [B, N, K+1]
+        
+        在前面 pad 一列 -100（对应 CLS_SEG 位置，不计算损失）
+        
+        Args:
+            mlm_labels: [B, N, K] - 外部提供的 MLM 标签（不含 CLS）
+            
+        Returns:
+            padded_labels: [B, N, K+1] - 扩展后的标签（含 CLS 位置）
+        """
+        batch_size, num_segments, seq_len = mlm_labels.shape
+        
+        # 创建 CLS 位置的 padding（-100 表示忽略）
+        cls_pad = mlm_labels.new_full(
+            (batch_size, num_segments, 1),
+            fill_value=-100
+        )
+        
+        # 拼接: [B, N, 1] + [B, N, K] -> [B, N, K+1]
+        padded_labels = torch.cat([cls_pad, mlm_labels], dim=-1)
+        
+        return padded_labels
     
     def forward(
         self,
@@ -124,9 +159,9 @@ class HATInterleaved512ForMLM(nn.Module):
         前向传播
         
         Args:
-            input_ids: [B, N, K] - 输入 token IDs（包含被 mask 的位置）
+            input_ids: [B, N, K] - 输入 token IDs（包含被 mask 的位置，不含 CLS）
             attention_mask: [B, N, K] - attention mask (可选)
-            mlm_labels: [B, N, K+1] - MLM 标签 (可选)
+            mlm_labels: [B, N, K] - MLM 标签 (可选，不含 CLS)
                 - 非 mask 位置为 -100（忽略）
                 - mask 位置为原始 token ID
                 
@@ -137,14 +172,14 @@ class HATInterleaved512ForMLM(nn.Module):
         batch_size, num_segments, segment_len = input_ids.shape
         device = input_ids.device
         
-        # Step 1: 嵌入
+        # Step 1: 嵌入（模型内部插入 CLS_SEG）
         # [B, N, K] -> [B, N, K+1, H]
         hidden_states = self.embeddings(input_ids)
         
         # Step 2: 创建 masks
-        seq_len = hidden_states.shape[2]
+        seq_len_with_cls = hidden_states.shape[2]  # K+1
         token_mask, segment_mask = self._create_masks(
-            attention_mask, batch_size, num_segments, seq_len, device
+            attention_mask, batch_size, num_segments, seq_len_with_cls, device
         )
         
         # Step 3: 编码器
@@ -161,13 +196,17 @@ class HATInterleaved512ForMLM(nn.Module):
         
         # Step 5: 计算损失
         if mlm_labels is not None:
+            # 将 mlm_labels 从 [B, N, K] 扩展为 [B, N, K+1]
+            # 在 CLS 位置 pad -100（不计算损失）
+            mlm_labels_padded = self._pad_mlm_labels(mlm_labels)
+            
             loss_fn = nn.CrossEntropyLoss()  # 默认 ignore_index=-100
             # Flatten for loss computation
             # prediction_scores: [B, N, K+1, V] -> [B*N*(K+1), V]
-            # mlm_labels: [B, N, K+1] -> [B*N*(K+1)]
+            # mlm_labels_padded: [B, N, K+1] -> [B*N*(K+1)]
             loss = loss_fn(
                 prediction_scores.view(-1, self.config.vocab_size),
-                mlm_labels.view(-1)
+                mlm_labels_padded.view(-1)
             )
             return loss, prediction_scores
         
@@ -200,7 +239,7 @@ def create_mlm_model(config: Optional[HATConfig] = None) -> HATInterleaved512For
 # =============================================================================
 
 if __name__ == "__main__":
-    from .hat_model import HATConfig, print_model_info
+    from .hat_model import HATConfig
     
     print("=" * 60)
     print("HAT MLM Model Self-Test")
@@ -220,14 +259,16 @@ if __name__ == "__main__":
     input_ids = torch.randint(5, config.vocab_size, (batch_size, num_segments, segment_len))
     attention_mask = torch.ones(batch_size, num_segments, segment_len, dtype=torch.long)
     
-    # MLM labels: [B, N, K+1] (-100 表示不计算损失)
-    mlm_labels = torch.full((batch_size, num_segments, segment_len + 1), -100, dtype=torch.long)
-    # 随机选择一些位置作为 mask
-    mask_positions = torch.rand(batch_size, num_segments, segment_len + 1) < 0.15
+    # MLM labels: [B, N, K] - 外部提供，不含 CLS
+    # 模型内部会 pad 为 [B, N, K+1]
+    mlm_labels = torch.full((batch_size, num_segments, segment_len), -100, dtype=torch.long)
+    # 随机选择一些位置作为 mask（约 15%）
+    mask_positions = torch.rand(batch_size, num_segments, segment_len) < 0.15
     mlm_labels[mask_positions] = torch.randint(5, config.vocab_size, mlm_labels.shape)[mask_positions]
     
     print(f"input_ids shape: {input_ids.shape}")
-    print(f"mlm_labels shape: {mlm_labels.shape}")
+    print(f"mlm_labels shape (外部): {mlm_labels.shape}")
+    print(f"mlm_labels shape (模型内部 pad 后): [B, N, K+1] = [{batch_size}, {num_segments}, {segment_len + 1}]")
     
     # 测试 forward
     model.eval()
@@ -237,5 +278,8 @@ if __name__ == "__main__":
     print(f"Loss: {loss.item():.4f}")
     print(f"Prediction scores shape: {scores.shape}")
     
+    # 验证形状
+    assert scores.shape == (batch_size, num_segments, segment_len + 1, config.vocab_size), \
+        f"Expected {(batch_size, num_segments, segment_len + 1, config.vocab_size)}, got {scores.shape}"
+    
     print("\n✓ MLM Model test passed!")
-

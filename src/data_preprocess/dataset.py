@@ -244,7 +244,12 @@ class MLMDataCollator(HATDataCollator):
     """
     MLM 预训练的数据整理器
     
-    额外处理 mask 标记
+    额外处理 mask 标记。
+    
+    注意：
+    - 输出的 mlm_labels 形状为 [B, N, K]，不含 CLS
+    - 模型（HATInterleaved512ForMLM）在 forward 时会将 labels pad 为 [B, N, K+1]
+    - CLS 位置的损失会被忽略（label = -100）
     """
     
     def __init__(
@@ -260,9 +265,10 @@ class MLMDataCollator(HATDataCollator):
         self.vocab_size = tokenizer.vocab_size
         
         # 特殊 token 集合（不能被 mask）
+        # 注意：不包含 cls_token_id，因为当前数据预处理阶段不会出现 CLS token
+        # CLS 只在模型 forward 时由 HATEmbeddings 插入
         self.special_token_ids = {
             tokenizer.pad_token_id,
-            tokenizer.cls_token_id,
             tokenizer.sep_token_id,
             tokenizer.unk_token_id,
             tokenizer.mask_token_id,
