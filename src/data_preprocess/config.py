@@ -1,24 +1,39 @@
 """
 数据预处理配置文件
 HAT-I1 模型的数据处理参数配置
+
+注意：关键参数（vocab_size, segment_length 等）从 common_config 引用，
+确保与模型配置一致。
 """
 
 from dataclasses import dataclass, field
-from typing import List, Dict, Optional
+from typing import Dict
 from pathlib import Path
+import sys
+
+# 添加项目根目录以导入 common_config
+_project_root = Path(__file__).parent.parent.parent
+if str(_project_root) not in sys.path:
+    sys.path.insert(0, str(_project_root))
+
+from src.common_config import COMMON_CONFIG
 
 
 @dataclass
 class SpecialTokens:
-    """特殊 Token 配置"""
-    PAD: int = 0      # 填充 token
-    UNK: int = 1      # 未知 token
-    CLS_DOC: int = 2  # 文档级 CLS（可选）
-    SEP: int = 3      # 分隔符
-    MASK: int = 4     # MLM 掩码
+    """
+    特殊 Token 配置
     
-    # 特殊 token 的数量，用于计算偏移量
-    NUM_SPECIAL: int = 5
+    从 COMMON_CONFIG 引用，确保与模型一致。
+    """
+    PAD: int = COMMON_CONFIG.pad_token_id
+    UNK: int = COMMON_CONFIG.unk_token_id
+    CLS_DOC: int = COMMON_CONFIG.cls_token_id
+    SEP: int = COMMON_CONFIG.sep_token_id
+    MASK: int = COMMON_CONFIG.mask_token_id
+    
+    # 特殊 token 的数量
+    NUM_SPECIAL: int = COMMON_CONFIG.id_offset
     
     def to_dict(self) -> Dict[str, int]:
         return {
@@ -32,23 +47,26 @@ class SpecialTokens:
 
 @dataclass
 class SegmenterConfig:
-    """分段器配置"""
-    # 每个 segment 的最大长度（不含 CLS_SEG）
-    segment_length: int = 512
+    """
+    分段器配置
     
-    # 最大 segment 数量（4096 / 512 = 8）
-    max_segments: int = 8
-    
-    # 最大序列总长度
-    max_seq_length: int = 4096
+    注意：segment_length, max_segments, max_seq_length 从 COMMON_CONFIG 引用。
+    分段器不添加 CLS_SEG，CLS_SEG 由模型负责添加。
+    """
+    # 从公共配置引用（确保与模型一致）
+    segment_length: int = COMMON_CONFIG.segment_length
+    max_segments: int = COMMON_CONFIG.max_segments
+    max_seq_length: int = COMMON_CONFIG.max_seq_length
     
     # 尾段回拉的最小长度阈值（低于此值则回拉）
     tail_pullback_threshold: float = 0.5  # segment_length 的比例
     
     # 训练时对超长文档的处理策略: 'random_window', 'head_tail', 'head_only'
+    # 推荐 random_window，可作为数据增强
     train_long_strategy: str = 'random_window'
     
     # 推理时对超长文档的处理策略: 'sliding_window', 'head_only'
+    # 推荐 sliding_window，外部代码对多窗口 logits 聚合
     infer_long_strategy: str = 'sliding_window'
     
     # 滑动窗口的步长（推理时使用）
@@ -57,19 +75,16 @@ class SegmenterConfig:
 
 @dataclass
 class TokenizerConfig:
-    """Tokenizer 配置"""
-    # 原始 token ID 范围
-    original_min_id: int = 0
-    original_max_id: int = 7549
+    """
+    Tokenizer 配置
     
-    # ID 偏移量（为特殊 token 预留空间）
-    id_offset: int = 5
-    
-    # 词表大小（包含特殊 token）
-    vocab_size: int = 7555  # 7549 + 1 + 5
-    
-    # 是否在每个 segment 前添加 CLS
-    add_segment_cls: bool = True
+    从 COMMON_CONFIG 引用关键参数。
+    """
+    # 从公共配置引用
+    original_min_id: int = COMMON_CONFIG.original_min_token_id
+    original_max_id: int = COMMON_CONFIG.original_max_token_id
+    id_offset: int = COMMON_CONFIG.id_offset
+    vocab_size: int = COMMON_CONFIG.vocab_size
 
 
 @dataclass
@@ -93,23 +108,36 @@ class DataCleaningConfig:
 
 @dataclass
 class ClassBalanceConfig:
-    """类别平衡配置"""
+    """
+    类别平衡配置
+    
+    警告：默认只使用一种平衡手段。
+    - use_weighted_sampler=True + 损失函数不加权：使用采样器平衡
+    - use_weighted_sampler=False + 损失函数加权：使用损失权重平衡
+    
+    不建议同时使用两种方式，可能导致过度补偿。
+    """
     # 类别权重计算方式: 'inverse_sqrt', 'inverse_log', 'effective_num', 'none'
     weight_method: str = 'inverse_sqrt'
     
-    # Effective Number of Samples 的 beta 参数（仅在 weight_method='effective_num' 时使用）
+    # Effective Number of Samples 的 beta 参数
     effective_num_beta: float = 0.9999
     
     # 是否使用 WeightedRandomSampler
-    use_weighted_sampler: bool = True
+    # 警告：如果同时使用 sampler 和 loss 权重，可能导致双重补偿
+    use_weighted_sampler: bool = False  # 默认关闭，推荐使用 loss 权重
     
-    # 采样器的权重平滑因子（降低过采样强度）
-    sampler_smoothing: float = 0.5  # 0=均匀采样, 1=完全按权重采样
+    # 采样器的权重平滑因子
+    sampler_smoothing: float = 0.5
 
 
 @dataclass
 class DataConfig:
-    """数据预处理总配置"""
+    """
+    数据预处理总配置
+    
+    关键参数从 COMMON_CONFIG 引用，确保与模型一致。
+    """
     # 数据路径
     data_dir: Path = Path("/home/byhx/workspace/tianchi/data")
     train_file: str = "train_set.csv"
@@ -125,8 +153,8 @@ class DataConfig:
     cleaning: DataCleaningConfig = field(default_factory=DataCleaningConfig)
     class_balance: ClassBalanceConfig = field(default_factory=ClassBalanceConfig)
     
-    # 类别数
-    num_labels: int = 14
+    # 从公共配置引用
+    num_labels: int = COMMON_CONFIG.num_labels
     
     # 验证集划分比例
     val_split_ratio: float = 0.1
@@ -154,6 +182,3 @@ def get_default_config() -> DataConfig:
 
 # 导出默认配置实例
 DEFAULT_CONFIG = get_default_config()
-
-
-

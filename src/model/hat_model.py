@@ -10,17 +10,30 @@ HATInterleaved512ForClassification - 层次化 Transformer 长文本分类模型
 - 6 层 HATLayer，每层包含 SWE + CSE + 回注
 - 等效于 BERT-base 规模 (hidden_size=768, 12 heads, ~100M 参数)
 
+输入/输出约定：
+- 输入 input_ids: [B, N, K] - 不含 CLS_SEG，由模型在 forward 时添加
+- 输出 logits: [B, num_labels] 或 (loss, logits)
+
 Author: HAT Project
 Date: 2024
 """
 
 import math
-from dataclasses import dataclass, field
+import sys
+from dataclasses import dataclass
 from typing import Optional, Tuple, Union
+from pathlib import Path
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+# 导入公共配置
+_project_root = Path(__file__).parent.parent.parent
+if str(_project_root) not in sys.path:
+    sys.path.insert(0, str(_project_root))
+
+from src.common_config import COMMON_CONFIG
 
 
 # =============================================================================
@@ -32,11 +45,26 @@ class HATConfig:
     """
     HAT 模型配置类
     
-    集中管理所有超参数，便于调整和复用。
+    关键参数从 COMMON_CONFIG 引用，确保与数据预处理一致。
     """
+    # ========== 从 COMMON_CONFIG 引用的参数 ==========
     # 词表相关
-    vocab_size: int = 7555  # 原始 0-7549 偏移 +5，预留 0-4 给特殊 token
+    vocab_size: int = COMMON_CONFIG.vocab_size
     
+    # 序列长度相关
+    max_segments: int = COMMON_CONFIG.max_segments
+    segment_length: int = COMMON_CONFIG.segment_length
+    max_position_embeddings_segment: int = COMMON_CONFIG.max_position_embeddings_segment
+    max_position_embeddings_segment_level: int = COMMON_CONFIG.max_position_embeddings_segment_level
+    
+    # 分类任务
+    num_labels: int = COMMON_CONFIG.num_labels
+    
+    # 特殊 token ID
+    pad_token_id: int = COMMON_CONFIG.pad_token_id
+    cls_seg_token_id: int = COMMON_CONFIG.cls_token_id
+    
+    # ========== 模型特有参数 ==========
     # 模型尺寸
     hidden_size: int = 768
     num_attention_heads: int = 12
@@ -45,22 +73,9 @@ class HATConfig:
     # 层数
     num_hat_layers: int = 6  # HATLayer 个数，每个 = SWE + CSE
     
-    # 序列长度相关
-    max_segments: int = 8  # 最大 segment 数
-    segment_length: int = 512  # 每个 segment 的 token 数（不含 CLS_SEG）
-    max_position_embeddings_segment: int = 513  # 段内位置数（含 CLS_SEG）
-    max_position_embeddings_segment_level: int = 8  # 段级位置数
-    
-    # 分类任务
-    num_labels: int = 14
-    
     # 正则化
     hidden_dropout_prob: float = 0.1
     attention_probs_dropout_prob: float = 0.1
-    
-    # 特殊 token ID
-    pad_token_id: int = 0
-    cls_seg_token_id: int = 2  # CLS_SEG 使用的 token ID
     
     # 初始化
     initializer_range: float = 0.02

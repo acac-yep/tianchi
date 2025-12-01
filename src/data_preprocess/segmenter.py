@@ -1,9 +1,12 @@
 """
 文档分段器模块
 实现 HAT 模型需要的长文档分段策略
+
+注意：分段器只负责将长文档切分成多个 segment，不添加任何特殊 token。
+CLS_SEG 由模型在 forward 时统一添加。
 """
 
-from typing import List, Tuple, Optional, Dict, Union
+from typing import List, Tuple, Optional, Dict
 import numpy as np
 import random
 from dataclasses import dataclass
@@ -13,14 +16,21 @@ from .config import SegmenterConfig, SpecialTokens, DEFAULT_CONFIG
 
 @dataclass
 class SegmentedDocument:
-    """分段后的文档数据结构"""
+    """
+    分段后的文档数据结构
+    
+    注意：segment_ids 中不包含 CLS_SEG，CLS_SEG 由模型添加。
+    因此每个 segment 的长度为 segment_length（如 512），
+    模型添加 CLS_SEG 后变为 segment_length + 1（如 513）。
+    """
     # 分段后的 token IDs，形状: [num_segments, segment_length]
+    # 不含 CLS_SEG，由模型添加
     segment_ids: List[List[int]]
     
     # 每个 segment 的 attention mask，形状: [num_segments, segment_length]
     segment_attention_masks: List[List[int]]
     
-    # 每个 segment 的实际长度（不含 padding）
+    # 每个 segment 的实际 token 长度（不含 padding，不含 CLS_SEG）
     segment_lengths: List[int]
     
     # 原始文档的总 token 数
@@ -52,35 +62,32 @@ class DocumentSegmenter:
     文档分段器
     
     将长文档按照 HAT 模型的要求切分成多个 segment：
-    1. 每个 segment 长度为 K=512
+    1. 每个 segment 长度为 K=512 tokens
     2. 最多 8 个 segment（总长度 4096）
     3. 尾段回拉策略避免过短的尾段
-    4. 每个 segment 前添加 CLS token
+    
+    注意：
+    - 分段器不添加任何特殊 token（CLS_SEG 由模型负责添加）
+    - 输出的 segment_ids 形状为 [N, K]，模型接收后会变成 [N, K+1]
     """
     
     def __init__(
         self,
         config: SegmenterConfig = None,
         special_tokens: SpecialTokens = None,
-        add_segment_cls: bool = True
     ):
         self.config = config or DEFAULT_CONFIG.segmenter
         self.special_tokens = special_tokens or DEFAULT_CONFIG.special_tokens
-        self.add_segment_cls = add_segment_cls
         
         # 预计算常用值
         self.segment_length = self.config.segment_length  # K = 512
         self.max_segments = self.config.max_segments      # 8
         self.max_seq_length = self.config.max_seq_length  # 4096
         
-        # 如果添加 CLS，每个 segment 实际能容纳的 token 数减 1
-        self.effective_segment_length = self.segment_length - 1 if add_segment_cls else self.segment_length
-        
         # 尾段回拉阈值
-        self.tail_threshold = int(self.effective_segment_length * self.config.tail_pullback_threshold)
+        self.tail_threshold = int(self.segment_length * self.config.tail_pullback_threshold)
         
-        # 特殊 token
-        self.cls_token_id = self.special_tokens.CLS_DOC
+        # 特殊 token（仅用于 padding）
         self.pad_token_id = self.special_tokens.PAD
         
     def segment_document(
@@ -99,6 +106,8 @@ class DocumentSegmenter:
             
         Returns:
             SegmentedDocument 对象
+            - segment_ids: [N, K] 不含 CLS_SEG
+            - 模型会在 forward 时将其转换为 [N, K+1]
         """
         original_length = len(token_ids)
         
@@ -106,7 +115,7 @@ class DocumentSegmenter:
             # 空文档处理
             return self._create_empty_document()
         
-        # Step 1: 按 effective_segment_length 切分
+        # Step 1: 按 segment_length 切分
         raw_segments = self._split_into_segments(token_ids)
         
         # Step 2: 尾段回拉处理
@@ -126,7 +135,7 @@ class DocumentSegmenter:
                 segments = segments[:self.max_segments]
                 truncation_strategy = 'head_only'
         
-        # Step 4: 添加 CLS token 和 padding
+        # Step 4: Padding（不添加 CLS）
         segment_ids, segment_masks, segment_lengths = self._finalize_segments(segments)
         
         return SegmentedDocument(
@@ -141,11 +150,11 @@ class DocumentSegmenter:
     
     def _split_into_segments(self, token_ids: List[int]) -> List[List[int]]:
         """
-        将 token 序列按 effective_segment_length 切分
+        将 token 序列按 segment_length 切分
         """
         segments = []
-        for i in range(0, len(token_ids), self.effective_segment_length):
-            segment = token_ids[i:i + self.effective_segment_length]
+        for i in range(0, len(token_ids), self.segment_length):
+            segment = token_ids[i:i + self.segment_length]
             segments.append(segment)
         return segments
     
@@ -166,8 +175,8 @@ class DocumentSegmenter:
         
         # 如果尾段长度小于阈值，执行回拉
         if len(last_segment) < self.tail_threshold:
-            # 计算回拉起点：从文档末尾往前数 effective_segment_length 个 token
-            pullback_start = max(0, len(original_tokens) - self.effective_segment_length)
+            # 计算回拉起点：从文档末尾往前数 segment_length 个 token
+            pullback_start = max(0, len(original_tokens) - self.segment_length)
             new_last_segment = original_tokens[pullback_start:]
             
             # 替换最后一个 segment
@@ -184,7 +193,7 @@ class DocumentSegmenter:
         训练时的截断策略
         
         支持三种策略：
-        1. random_window: 随机选择连续的 max_segments 个段
+        1. random_window: 随机选择连续的 max_segments 个段（推荐，数据增强效果）
         2. head_tail: 前 (max_segments-1) 段 + 最后一段
         3. head_only: 只取前 max_segments 段
         """
@@ -214,7 +223,9 @@ class DocumentSegmenter:
         segments: List[List[int]]
     ) -> Tuple[List[List[int]], List[List[int]], List[int]]:
         """
-        最终处理：添加 CLS token 和 padding
+        最终处理：Padding 到 segment_length
+        
+        注意：不添加 CLS_SEG，CLS_SEG 由模型负责添加
         
         Returns:
             (segment_ids, attention_masks, actual_lengths)
@@ -224,23 +235,17 @@ class DocumentSegmenter:
         segment_lengths = []
         
         for segment in segments:
-            if self.add_segment_cls:
-                # 在 segment 前添加 CLS token
-                segment_with_cls = [self.cls_token_id] + segment
-            else:
-                segment_with_cls = segment
-            
-            actual_length = len(segment_with_cls)
+            actual_length = len(segment)
             segment_lengths.append(actual_length)
             
             # Padding 到 segment_length
             padding_length = self.segment_length - actual_length
             if padding_length > 0:
-                padded_segment = segment_with_cls + [self.pad_token_id] * padding_length
+                padded_segment = segment + [self.pad_token_id] * padding_length
                 attention_mask = [1] * actual_length + [0] * padding_length
             else:
-                # 如果超过了（理论上不应该），截断
-                padded_segment = segment_with_cls[:self.segment_length]
+                # 如果刚好等于 segment_length
+                padded_segment = segment[:self.segment_length]
                 attention_mask = [1] * self.segment_length
             
             segment_ids.append(padded_segment)
@@ -250,17 +255,14 @@ class DocumentSegmenter:
     
     def _create_empty_document(self) -> SegmentedDocument:
         """创建空文档的分段结果"""
-        if self.add_segment_cls:
-            segment = [self.cls_token_id] + [self.pad_token_id] * (self.segment_length - 1)
-            mask = [1] + [0] * (self.segment_length - 1)
-        else:
-            segment = [self.pad_token_id] * self.segment_length
-            mask = [0] * self.segment_length
+        # 空文档：全 padding
+        segment = [self.pad_token_id] * self.segment_length
+        mask = [0] * self.segment_length
         
         return SegmentedDocument(
             segment_ids=[segment],
             segment_attention_masks=[mask],
-            segment_lengths=[1 if self.add_segment_cls else 0],
+            segment_lengths=[0],
             original_length=0,
             num_segments=1,
             is_truncated=False,
@@ -274,7 +276,8 @@ class DocumentSegmenter:
         """
         推理时的滑动窗口处理
         
-        将超长文档切成多个窗口，每个窗口独立分段
+        将超长文档切成多个窗口，每个窗口独立分段。
+        外部代码需要对多个窗口的 logits 进行聚合（如求和/平均）。
         
         Args:
             token_ids: 重映射后的 token ID 列表
@@ -333,7 +336,10 @@ class DocumentSegmenter:
             pad_to_max_segments: 是否 pad 到 max_segments（否则 pad 到 batch 内最大值）
             
         Returns:
-            包含 batched tensors 的字典
+            包含 batched tensors 的字典:
+            - input_ids: [B, N, K] - 不含 CLS_SEG
+            - attention_mask: [B, N, K]
+            - segment_mask: [B, N]
         """
         if pad_to_max_segments:
             target_num_segments = self.max_segments
@@ -373,6 +379,3 @@ class DocumentSegmenter:
 def create_segmenter(config: SegmenterConfig = None) -> DocumentSegmenter:
     """工厂函数：创建分段器实例"""
     return DocumentSegmenter(config=config)
-
-
-
