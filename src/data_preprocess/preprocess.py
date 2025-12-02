@@ -35,7 +35,7 @@ from sklearn.model_selection import train_test_split
 # 添加项目根目录到 path
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 if str(PROJECT_ROOT) not in sys.path:
-sys.path.insert(0, str(PROJECT_ROOT))
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.data_preprocess.config import DataConfig, get_default_config
 from src.data_preprocess.tokenizer import HATTokenizer, create_tokenizer

@@ -54,6 +54,8 @@ num_labels = COMMON_CONFIG.num_labels           # 14
 
 ### 2.1 处理流程
 
+**预处理阶段（`scripts/run_preprocessing.py`）：**
+
 ```
 原始文本 (空格分隔的 token ID)
     ↓
@@ -61,10 +63,31 @@ num_labels = COMMON_CONFIG.num_labels           # 14
     ↓
 2. 数据清洗（去重、冲突处理）
     ↓
-3. 文档分段（512 tokens/segment）
+3. 划分 train/val（stratified）
     ↓
-4. 输出 [B, N, K] 格式（不含 CLS_SEG）
+4. 计算类别权重
+    ↓
+5. 保存处理后的文本（仍为原始长度，未分段）
 ```
+
+**训练阶段（`HATDataset` 动态处理）：**
+
+```
+预处理后的文本（空格分隔的 token ID）
+    ↓
+1. Tokenize（解析 token ID 字符串）
+    ↓
+2. 文档分段（512 tokens/segment，最多 8 段）
+    ↓
+3. 输出 [N, K] 格式（不含 CLS_SEG）
+    ↓
+4. HATDataCollator 整理为 [B, N, K] batch
+```
+
+> **重要说明**：文档分段在训练时由 `HATDataset.__getitem__` 动态完成，而非预处理阶段。这样设计的好处是：
+> - 预处理速度快，数据文件小
+> - 支持不同的分段策略（训练时 random_window，推理时 sliding_window）
+> - 灵活的数据增强（每次访问可能得到不同的分段结果）
 
 ### 2.2 Token ID 重映射
 
@@ -82,6 +105,10 @@ encoded = tokenizer.encode("100 200 300")  # [105, 205, 305]
 ```
 
 ### 2.3 文档分段
+
+**分段时机：**
+- ⚠️ **不在预处理阶段**：预处理只保存重映射后的完整文本（原始长度）
+- ✅ **在训练时动态完成**：由 `HATDataset.__getitem__` 调用 `DocumentSegmenter.segment_document()` 完成
 
 **职责边界（重要）：**
 - ✅ 分段器负责：切分 512 tokens/segment、尾段回拉、超长截断、padding
@@ -102,6 +129,19 @@ encoded = tokenizer.encode("100 200 300")  # [105, 205, 305]
 **超长文档处理：**
 - **训练时**：推荐 `random_window`（随机选连续 8 段作为数据增强）
 - **推理时**：使用滑动窗口，外部代码对多窗口 logits 聚合（求和/平均）
+
+**实现细节：**
+```python
+# HATDataset.__getitem__ 中的处理流程
+def _process_text(self, idx: int) -> SegmentedDocument:
+    text = self.texts[idx]  # 空格分隔的 token ID 字符串
+    token_ids = self.tokenizer.encode(text)  # 解析为 token ID 列表
+    segmented = self.segmenter.segment_document(
+        token_ids, 
+        mode='train' if self.mode != 'pretrain' else 'train'
+    )
+    return segmented  # 返回 [N, K] 格式的 SegmentedDocument
+```
 
 ### 2.4 数据清洗
 
@@ -284,11 +324,21 @@ loss, prediction_scores = mlm_model(input_ids, attention_mask, mlm_labels)
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                        数据预处理阶段                            │
+│                    预处理阶段 (run_preprocessing.py)              │
 ├─────────────────────────────────────────────────────────────────┤
 │  原始文本 "100 200 300 ..."                                      │
+│      ↓ Token ID 重映射 (+5)                                     │
+│  重映射文本 "105 205 305 ..."                                    │
+│      ↓ 数据清洗、划分 train/val                                  │
+│  保存到 train.csv / val.csv (完整文本，未分段)                    │
+└─────────────────────────────────────────────────────────────────┘
+                              ↓
+┌─────────────────────────────────────────────────────────────────┐
+│                  训练阶段 (HATDataset 动态处理)                   │
+├─────────────────────────────────────────────────────────────────┤
+│  文本 "105 205 305 ..."                                          │
 │      ↓ HATTokenizer.encode()                                    │
-│  Token IDs [105, 205, 305, ...]  (ID + 5)                       │
+│  Token IDs [105, 205, 305, ...]                                 │
 │      ↓ DocumentSegmenter.segment_document()                     │
 │  Segments [N, K]  (不含 CLS_SEG)                                 │
 │      ↓ HATDataCollator()                                        │
@@ -330,10 +380,12 @@ src/data_preprocess/config.py    src/model/hat_model.py
 
 ## 7. 注意事项
 
-1. **CLS_SEG 添加位置**：只由模型负责，分段器不添加
-2. **配置一致性**：修改 segment_length 等参数时，只需修改 common_config.py
-3. **类别平衡**：避免同时使用 sampler 和 loss 权重，防止双重补偿
-4. **超长文档**：训练用 random_window，推理用 sliding_window + logits 聚合
-5. **数据清洗顺序**：先清洗再划分 train/val
-6. **MLM labels 形状**：外部提供 `[B, N, K]`，模型内部 pad 为 `[B, N, K+1]`
-7. **空文档**：在数据清洗阶段移除，segmenter 的空文档处理仅为防御性代码
+1. **分段处理时机**：文档分段在训练时由 `HATDataset` 动态完成，不在预处理阶段
+2. **CLS_SEG 添加位置**：只由模型负责，分段器不添加
+3. **配置一致性**：修改 segment_length 等参数时，只需修改 common_config.py
+4. **类别平衡**：避免同时使用 sampler 和 loss 权重，防止双重补偿
+5. **超长文档**：训练用 random_window，推理用 sliding_window + logits 聚合
+6. **数据清洗顺序**：先清洗再划分 train/val
+7. **MLM labels 形状**：外部提供 `[B, N, K]`，模型内部 pad 为 `[B, N, K+1]`
+8. **空文档**：在数据清洗阶段移除，segmenter 的空文档处理仅为防御性代码
+9. **预处理输出**：预处理后的 CSV 文件保存的是完整文本（重映射后），长度可能超过 4096 tokens，分段在训练时处理

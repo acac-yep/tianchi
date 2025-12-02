@@ -7,7 +7,7 @@ HAT-I1 模型的数据处理参数配置
 """
 
 from dataclasses import dataclass, field
-from typing import Dict
+from typing import Dict, Optional
 from pathlib import Path
 import sys
 
@@ -137,14 +137,17 @@ class DataConfig:
     数据预处理总配置
     
     关键参数从 COMMON_CONFIG 引用，确保与模型一致。
+    
+    注意：data_dir 和 output_dir 的默认值为 None，应在使用时通过参数传入。
+    这样可以避免硬编码路径导致的跨环境问题。
     """
-    # 数据路径
-    data_dir: Path = Path("/home/byhx/workspace/tianchi/data")
+    # 数据路径（默认 None，需通过参数传入）
+    data_dir: Optional[Path] = None
     train_file: str = "train_set.csv"
     test_file: str = "test_a.csv"
     
-    # 输出路径
-    output_dir: Path = Path("/home/byhx/workspace/tianchi/data/processed")
+    # 输出路径（默认 None，需通过参数传入）
+    output_dir: Optional[Path] = None
     
     # 子配置
     special_tokens: SpecialTokens = field(default_factory=SpecialTokens)
@@ -164,15 +167,29 @@ class DataConfig:
     
     @property
     def train_path(self) -> Path:
+        if self.data_dir is None:
+            raise ValueError("data_dir 未设置，请在使用前通过参数传入")
         return self.data_dir / self.train_file
     
     @property
     def test_path(self) -> Path:
+        if self.data_dir is None:
+            raise ValueError("data_dir 未设置，请在使用前通过参数传入")
         return self.data_dir / self.test_file
     
     def __post_init__(self):
-        """确保输出目录存在"""
-        self.output_dir.mkdir(parents=True, exist_ok=True)
+        """确保输出目录存在（仅在 output_dir 已设置时）"""
+        if self.output_dir is not None:
+            try:
+                self.output_dir.mkdir(parents=True, exist_ok=True)
+            except (PermissionError, OSError) as e:
+                # 如果无法创建目录，记录警告但不抛出异常
+                # 让调用者处理目录创建
+                import warnings
+                warnings.warn(
+                    f"无法创建输出目录 {self.output_dir}: {e}. "
+                    "请确保有写入权限，或在使用时手动创建目录。"
+                )
 
 
 def get_default_config() -> DataConfig:
