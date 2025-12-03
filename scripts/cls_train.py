@@ -395,6 +395,7 @@ def main():
                     f"LR: {lr_now:.2e} | "
                     f"Speed: {samples_per_sec:.1f} samples/s"
                 )
+                sys.stdout.flush()
                 running_loss = 0.0
 
         # ===== 每个 epoch 结束做一次验证 =====
@@ -405,6 +406,7 @@ def main():
             f"Val Acc: {val_acc:.4f} | "
             f"Val Macro-F1: {val_f1:.4f}"
         )
+        sys.stdout.flush()
 
         # 保存最好模型
         if val_f1 > best_val_f1:

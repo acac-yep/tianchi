@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH -J cls_train_hat512
+#SBATCH -J test_cls
 #SBATCH -p gpu
 #SBATCH -N 1
 #SBATCH --gpus-per-node=1
@@ -41,16 +41,22 @@ echo "=== 开始分类训练 ==="
 echo "工作目录: $(pwd)"
 echo ""
 
+# 设置 PyTorch 内存优化（减少碎片化）
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
+# 禁用 Python 输出缓冲，确保日志实时写入文件
+export PYTHONUNBUFFERED=1
+
 # 单卡训练命令
 CUDA_VISIBLE_DEVICES=0 \
-python scripts/cls_train.py \
+python -u scripts/cls_train.py \
   --train-path data/processed/train.csv \
   --val-path data/processed/val.csv \
   --class-weights data/processed/class_weights.npy \
   --mlm-ckpt checkpoints/mlm_hat512/hat_mlm_final.pt \
   --output-dir checkpoints/cls_hat512 \
-  --batch-size 64 \
-  --eval-batch-size 128 \
+  --batch-size 32 \
+  --eval-batch-size 64 \
   --lr 1e-4 \
   --weight-decay 0.01 \
   --num-epochs 5 \
