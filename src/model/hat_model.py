@@ -12,7 +12,8 @@ HATInterleaved512ForClassification - 层次化 Transformer 长文本分类模型
 
 输入/输出约定：
 - 输入 input_ids: [B, N, K] - 不含 CLS_SEG，由模型在 forward 时添加
-- 输出 logits: [B, num_labels] 或 (loss, logits)
+- 输出: dict {"logits": logits} - logits 形状为 [B, num_labels]
+- 损失计算由训练脚本负责（标准 HuggingFace transformers 模式）
 
 Author: HAT Project
 Date: 2024
@@ -556,8 +557,8 @@ class HATInterleaved512ForClassification(nn.Module):
         self,
         input_ids: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
-        labels: Optional[torch.Tensor] = None
-    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+        labels: Optional[torch.Tensor] = None  # 保留参数以兼容，但不使用
+    ) -> dict:
         """
         前向传播
         
@@ -568,12 +569,11 @@ class HATInterleaved512ForClassification(nn.Module):
                 - K = segment_length (512)
             attention_mask: [B, N, K] - attention mask (可选)
                 - 1 表示有效 token, 0 表示 padding
-            labels: [B] - 分类标签 (可选)
-                - 如果提供，计算损失
+            labels: [B] - 分类标签 (可选，保留以兼容，但不使用)
+                - 损失计算由训练脚本负责
                 
         Returns:
-            - 如果 labels=None: logits [B, num_labels]
-            - 如果 labels 不为 None: (loss, logits)
+            dict: {"logits": logits} - logits 形状为 [B, num_labels]
         """
         batch_size, num_segments, segment_len = input_ids.shape
         device = input_ids.device
@@ -616,13 +616,8 @@ class HATInterleaved512ForClassification(nn.Module):
         doc_repr = self.classifier_dropout(doc_repr)
         logits = self.classifier(doc_repr)  # [B, num_labels]
         
-        # Step 6: 计算损失（如果提供了 labels）
-        if labels is not None:
-            loss_fn = nn.CrossEntropyLoss()
-            loss = loss_fn(logits, labels)
-            return loss, logits
-        
-        return logits
+        # 返回字典格式（HuggingFace transformers 标准格式）
+        return {"logits": logits}
     
     def get_num_parameters(self, trainable_only: bool = True) -> int:
         """获取参数数量"""
@@ -713,26 +708,29 @@ if __name__ == "__main__":
     print(f"attention_mask shape: {attention_mask.shape}")
     print(f"labels shape: {labels.shape}")
     
-    # 测试 forward（不带 labels）
-    print("\n--- Test Forward (without labels) ---")
+    # 测试 forward（模型返回字典格式）
+    print("\n--- Test Forward (returns dict) ---")
     model.eval()
     with torch.no_grad():
-        logits = model(input_ids, attention_mask=attention_mask)
+        outputs = model(input_ids, attention_mask=attention_mask)
+        logits = outputs["logits"]
     print(f"Output logits shape: {logits.shape}")
     assert logits.shape == (batch_size, config.num_labels), "Logits shape mismatch!"
-    print("✓ Forward pass without labels: OK")
+    print("✓ Forward pass: OK")
     
-    # 测试 forward（带 labels）
-    print("\n--- Test Forward (with labels) ---")
-    model.train()
-    loss, logits = model(input_ids, attention_mask=attention_mask, labels=labels)
+    # 测试损失计算（由外部负责）
+    print("\n--- Test Loss Computation (external) ---")
+    loss_fn = nn.CrossEntropyLoss()
+    loss = loss_fn(logits, labels)
     print(f"Loss: {loss.item():.4f}")
-    print(f"Output logits shape: {logits.shape}")
-    assert logits.shape == (batch_size, config.num_labels), "Logits shape mismatch!"
-    print("✓ Forward pass with labels: OK")
+    print("✓ Loss computation: OK")
     
-    # 测试反向传播
+    # 测试反向传播（使用外部计算的 loss）
     print("\n--- Test Backward ---")
+    model.train()
+    outputs = model(input_ids, attention_mask=attention_mask)
+    logits = outputs["logits"]
+    loss = loss_fn(logits, labels)
     loss.backward()
     print("✓ Backward pass: OK")
     
@@ -753,8 +751,9 @@ if __name__ == "__main__":
     for n_seg in [1, 4, 8]:
         test_input = torch.randint(5, config.vocab_size, (1, n_seg, segment_len))
         with torch.no_grad():
-            out = model(test_input)
-        print(f"  num_segments={n_seg}: output shape = {out.shape} ✓")
+            outputs = model(test_input)
+            logits = outputs["logits"]
+        print(f"  num_segments={n_seg}: logits shape = {logits.shape} ✓")
     
     print("\n" + "=" * 60)
     print("All tests passed!")
