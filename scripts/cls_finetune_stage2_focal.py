@@ -321,6 +321,24 @@ def main():
     val_loss, val_acc, val_f1 = evaluate(model, val_loader, device, loss_fn=loss_fn)
     print(f"Baseline Val Macro-F1: {val_f1:.4f}")
     best_val_f1 = val_f1
+    
+    # 保存 baseline checkpoint（确保即使训练无提升也有模型可保存）
+    best_path = output_dir / "hat_cls_best.pt"
+    torch.save(
+        {
+            'epoch': -1,  # -1 表示 baseline
+            'step': 0,
+            'model_state_dict': model.state_dict(),
+            'val_loss': val_loss,
+            'val_acc': val_acc,
+            'val_macro_f1': val_f1,
+            'loss_type': args.loss_type,
+            'focal_gamma': args.focal_gamma,
+            'seed': args.seed,
+        },
+        best_path,
+    )
+    print(f"  >> Baseline 模型已保存到: {best_path}")
 
     global_step = 0
     start_time = time.time()

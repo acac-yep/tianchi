@@ -86,7 +86,7 @@ for SEED in "${SEEDS[@]}"; do
       --eval-batch-size 64 \
       --lr 3e-5 \
       --weight-decay 0.01 \
-      --num-epochs 3 \
+      --num-epochs 1 \
       --warmup-ratio 0.05 \
       --log-every 50 \
       --early-patience 2 \
