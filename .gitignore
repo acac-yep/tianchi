@@ -59,6 +59,11 @@ slurm-*.err
 *.txt.log
 *.logits.npy
 
+outputs/
+submission/
+*.csv
+*.logits.npy
+
 # 临时文件
 *.tmp
 *.temp

@@ -312,7 +312,7 @@ def main():
     # ========== 4. 加载 MLM 预训练权重（可选） ==========
     if args.mlm_ckpt and Path(args.mlm_ckpt).exists():
         log_print(f"\n加载 MLM 预训练权重: {args.mlm_ckpt}")
-        ckpt = torch.load(args.mlm_ckpt, map_location='cpu')
+        ckpt = torch.load(args.mlm_ckpt, map_location='cpu', weights_only=False)
         mlm_state_dict = ckpt.get('model_state_dict', ckpt)
         # 直接 strict=False 加载，分类头保留随机初始化
         missing, unexpected = model.load_state_dict(mlm_state_dict, strict=False)

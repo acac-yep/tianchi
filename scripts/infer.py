@@ -325,7 +325,7 @@ def load_models(model_paths: str, device: torch.device) -> List[torch.nn.Module]
         model = create_model(config)
         
         # 加载权重
-        ckpt = torch.load(path, map_location='cpu')
+        ckpt = torch.load(path, map_location='cpu', weights_only=False)
         state_dict = ckpt.get('model_state_dict', ckpt)
         model.load_state_dict(state_dict, strict=True)
         
