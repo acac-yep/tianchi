@@ -32,6 +32,17 @@ PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 
+# =============================================================================
+# 日志工具
+# =============================================================================
+
+def log_print(*args, **kwargs):
+    """带时间戳的 print 函数"""
+    from datetime import datetime
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    print(f"[{timestamp}]", *args, **kwargs)
+
+
 def parse_args():
     """解析命令行参数"""
     parser = argparse.ArgumentParser(
@@ -99,23 +110,23 @@ def main():
     
     # 检查输入文件是否存在
     if not train_path.exists():
-        print(f"错误: 训练集文件不存在: {train_path}")
-        print(f"请确保数据文件位于正确位置")
+        log_print(f"错误: 训练集文件不存在: {train_path}")
+        log_print(f"请确保数据文件位于正确位置")
         sys.exit(1)
     
     if not test_path.exists():
-        print(f"错误: 测试集文件不存在: {test_path}")
-        print(f"请确保数据文件位于正确位置")
+        log_print(f"错误: 测试集文件不存在: {test_path}")
+        log_print(f"请确保数据文件位于正确位置")
         sys.exit(1)
     
-    print("=" * 60)
-    print("HAT 模型数据预处理")
-    print("=" * 60)
-    print(f"数据目录: {data_dir}")
-    print(f"输出目录: {output_dir}")
-    print(f"验证集比例: {args.val_ratio}")
-    print(f"随机种子: {args.seed}")
-    print("=" * 60)
+    log_print("=" * 60)
+    log_print("HAT 模型数据预处理")
+    log_print("=" * 60)
+    log_print(f"数据目录: {data_dir}")
+    log_print(f"输出目录: {output_dir}")
+    log_print(f"验证集比例: {args.val_ratio}")
+    log_print(f"随机种子: {args.seed}")
+    log_print("=" * 60)
     
     # 构造配置
     config = DataConfig(
@@ -161,23 +172,23 @@ def main():
     results = preprocessor.run(save_results=not args.no_save)
     
     # 打印总结
-    print("\n" + "=" * 60)
-    print("预处理完成！")
-    print("=" * 60)
-    print(f"训练集: {results['train_size']:,} 条")
-    print(f"验证集: {results['val_size']:,} 条")
-    print(f"测试集: {results['test_size']:,} 条")
+    log_print("\n" + "=" * 60)
+    log_print("预处理完成！")
+    log_print("=" * 60)
+    log_print(f"训练集: {results['train_size']:,} 条")
+    log_print(f"验证集: {results['val_size']:,} 条")
+    log_print(f"测试集: {results['test_size']:,} 条")
     
     if not args.no_save:
-        print(f"\n输出文件:")
-        print(f"  - {output_dir / 'train.csv'}")
-        print(f"  - {output_dir / 'val.csv'}")
-        print(f"  - {output_dir / 'test.csv'}")
-        print(f"  - {output_dir / 'class_weights.npy'}")
-        print(f"  - {output_dir / 'tokenizer' / 'tokenizer_config.json'}")
-        print(f"  - {output_dir / 'preprocessing_report.json'}")
+        log_print(f"\n输出文件:")
+        log_print(f"  - {output_dir / 'train.csv'}")
+        log_print(f"  - {output_dir / 'val.csv'}")
+        log_print(f"  - {output_dir / 'test.csv'}")
+        log_print(f"  - {output_dir / 'class_weights.npy'}")
+        log_print(f"  - {output_dir / 'tokenizer' / 'tokenizer_config.json'}")
+        log_print(f"  - {output_dir / 'preprocessing_report.json'}")
     
-    print("=" * 60)
+    log_print("=" * 60)
     
     return results
 

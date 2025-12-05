@@ -53,6 +53,17 @@ PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 
+# =============================================================================
+# 日志工具
+# =============================================================================
+
+def log_print(*args, **kwargs):
+    """带时间戳的 print 函数"""
+    from datetime import datetime
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    print(f"[{timestamp}]", *args, **kwargs)
+
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description='HAT 模型推理脚本（支持滑动窗口 + 多模型 ensemble）',
@@ -302,10 +313,10 @@ def load_models(model_paths: str, device: torch.device) -> List[torch.nn.Module]
     models = []
     config = HATConfig()
     
-    print(f"\n加载 {len(paths)} 个模型...")
+    log_print(f"\n加载 {len(paths)} 个模型...")
     
     for i, path in enumerate(paths):
-        print(f"  [{i+1}/{len(paths)}] {path}")
+        log_print(f"  [{i+1}/{len(paths)}] {path}")
         
         if not Path(path).exists():
             raise FileNotFoundError(f"Checkpoint 不存在: {path}")
@@ -324,11 +335,11 @@ def load_models(model_paths: str, device: torch.device) -> List[torch.nn.Module]
         
         # 打印 checkpoint 信息
         if 'val_macro_f1' in ckpt:
-            print(f"      Val Macro-F1: {ckpt['val_macro_f1']:.4f}")
+            log_print(f"      Val Macro-F1: {ckpt['val_macro_f1']:.4f}")
         
         models.append(model)
     
-    print(f"  共加载 {len(models)} 个模型")
+    log_print(f"  共加载 {len(models)} 个模型")
     return models
 
 
@@ -432,10 +443,10 @@ def run_inference(
     # logits_dict[doc_id] -> List[Tensor[num_labels]]，每个元素是一个模型的聚合 logits
     logits_dict = defaultdict(list)
     
-    print(f"\n开始 Ensemble 推理 (window_agg={window_agg}, model_agg={model_agg})...")
+    log_print(f"\n开始 Ensemble 推理 (window_agg={window_agg}, model_agg={model_agg})...")
     
     for i, model in enumerate(models):
-        print(f"\n  模型 [{i+1}/{len(models)}] 推理中...")
+        log_print(f"\n  模型 [{i+1}/{len(models)}] 推理中...")
         
         # 获取该模型对每个 doc 的 logits（已窗口聚合）
         doc_logits = infer_single_model(
@@ -450,7 +461,7 @@ def run_inference(
     preds = {}
     ensemble_logits = {}
     
-    print("\n  模型级聚合...")
+    log_print("\n  模型级聚合...")
     
     for doc_id, logit_list in logits_dict.items():
         stacked = torch.stack(logit_list, dim=0)  # [M, num_labels]
@@ -531,9 +542,9 @@ def save_submission(
         output_dir.mkdir(parents=True, exist_ok=True)
     
     submission_df.to_csv(output_path, index=False)
-    print(f"\n提交文件已保存到: {output_path}")
-    print(f"  样本数: {len(labels)}")
-    print(f"  类别分布: {np.bincount(labels, minlength=14)}")
+    log_print(f"\n提交文件已保存到: {output_path}")
+    log_print(f"  样本数: {len(labels)}")
+    log_print(f"  类别分布: {np.bincount(labels, minlength=14)}")
 
 
 # =============================================================================
@@ -556,7 +567,7 @@ def evaluate_on_val(
     from sklearn.metrics import f1_score, accuracy_score
     from src.data_preprocess import create_tokenizer, create_segmenter
     
-    print(f"\n在验证集上进行 Sanity Check: {val_path}")
+    log_print(f"\n在验证集上进行 Sanity Check: {val_path}")
     
     # 读取验证数据
     df = pd.read_csv(val_path, sep='\t')
@@ -597,8 +608,8 @@ def evaluate_on_val(
     macro_f1 = f1_score(labels_true, labels_pred, average='macro')
     accuracy = accuracy_score(labels_true, labels_pred)
     
-    print(f"\n  Val Macro-F1: {macro_f1:.4f}")
-    print(f"  Val Accuracy: {accuracy:.4f}")
+    log_print(f"\n  Val Macro-F1: {macro_f1:.4f}")
+    log_print(f"  Val Accuracy: {accuracy:.4f}")
 
 
 # =============================================================================
@@ -610,10 +621,10 @@ def main():
     
     # 设备
     device = torch.device(args.device if torch.cuda.is_available() else 'cpu')
-    print(f"使用设备: {device}")
+    log_print(f"使用设备: {device}")
     if device.type == 'cuda':
-        print(f"  GPU: {torch.cuda.get_device_name(0)}")
-        print(f"  显存: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f} GB")
+        log_print(f"  GPU: {torch.cuda.get_device_name(0)}")
+        log_print(f"  显存: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f} GB")
     
     # ========== 1. 加载模型 ==========
     models = load_models(args.model_paths, device)
@@ -621,7 +632,7 @@ def main():
     # 获取 num_labels
     from src.common_config import COMMON_CONFIG
     num_labels = COMMON_CONFIG.num_labels
-    print(f"\n类别数: {num_labels}")
+    log_print(f"\n类别数: {num_labels}")
     
     # ========== 2. 可选：验证集 sanity check ==========
     if args.val_path and Path(args.val_path).exists():
@@ -637,7 +648,7 @@ def main():
         )
     
     # ========== 3. 构建测试集 DataLoader ==========
-    print(f"\n加载测试数据: {args.test_path}")
+    log_print(f"\n加载测试数据: {args.test_path}")
     
     from src.data_preprocess import create_tokenizer, create_segmenter
     
@@ -646,7 +657,7 @@ def main():
     texts = test_df['text'].tolist()
     doc_ids = list(range(len(texts)))  # 使用行索引作为 doc_id
     
-    print(f"  测试样本数: {len(texts)}")
+    log_print(f"  测试样本数: {len(texts)}")
     
     tokenizer = create_tokenizer()
     segmenter = create_segmenter()
@@ -682,7 +693,7 @@ def main():
     )
     
     elapsed = time.time() - start_time
-    print(f"\n推理完成，耗时: {elapsed:.1f} 秒")
+    log_print(f"\n推理完成，耗时: {elapsed:.1f} 秒")
     
     # ========== 5. 保存结果 ==========
     save_submission(
@@ -696,9 +707,9 @@ def main():
         logits_path = Path(args.output_path).with_suffix('.logits.npy')
         logits_array = np.array([ensemble_logits[doc_id] for doc_id in sorted(preds.keys())])
         np.save(logits_path, logits_array)
-        print(f"Logits 已保存到: {logits_path}")
+        log_print(f"Logits 已保存到: {logits_path}")
     
-    print("\n✓ 推理完成！")
+    log_print("\n✓ 推理完成！")
 
 
 if __name__ == "__main__":

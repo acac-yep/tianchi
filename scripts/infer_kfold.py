@@ -23,6 +23,17 @@ PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 
+# =============================================================================
+# 日志工具
+# =============================================================================
+
+def log_print(*args, **kwargs):
+    """带时间戳的 print 函数"""
+    from datetime import datetime
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    print(f"[{timestamp}]", *args, **kwargs)
+
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description='K-Fold 模型推理辅助脚本',
@@ -104,9 +115,9 @@ def find_kfold_models(kfold_dir: Path) -> list:
             f"在 {kfold_dir} 中未找到任何 hat_cls_fold*_best.pt 文件"
         )
     
-    print(f"找到 {len(model_files)} 个 K-fold 模型:")
+    log_print(f"找到 {len(model_files)} 个 K-fold 模型:")
     for i, model_path in enumerate(model_files):
-        print(f"  [{i+1}] {model_path}")
+        log_print(f"  [{i+1}] {model_path}")
     
     return [str(p) for p in model_files]
 
@@ -118,9 +129,9 @@ def main():
     model_paths = find_kfold_models(args.kfold_dir)
     model_paths_str = ",".join(model_paths)
     
-    print(f"\n使用 {len(model_paths)} 个模型进行 Ensemble 推理")
-    print(f"窗口聚合: {args.window_agg}, 模型聚合: {args.model_agg}")
-    print()
+    log_print(f"\n使用 {len(model_paths)} 个模型进行 Ensemble 推理")
+    log_print(f"窗口聚合: {args.window_agg}, 模型聚合: {args.model_agg}")
+    log_print()
     
     # 构建 infer.py 命令
     infer_script = PROJECT_ROOT / "scripts" / "infer.py"
@@ -143,17 +154,17 @@ def main():
         cmd.append("--save-logits")
     
     # 执行推理
-    print("执行推理命令:")
-    print(" ".join(cmd))
-    print()
+    log_print("执行推理命令:")
+    log_print(" ".join(cmd))
+    log_print()
     
     result = subprocess.run(cmd, check=True)
     
-    print()
-    print("=" * 60)
-    print("K-Fold Ensemble 推理完成！")
-    print(f"输出文件: {args.output_path}")
-    print("=" * 60)
+    log_print()
+    log_print("=" * 60)
+    log_print("K-Fold Ensemble 推理完成！")
+    log_print(f"输出文件: {args.output_path}")
+    log_print("=" * 60)
 
 
 if __name__ == "__main__":

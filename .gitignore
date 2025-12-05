@@ -57,6 +57,7 @@ conda-meta/
 slurm-*.out
 slurm-*.err
 *.txt.log
+*.logits.npy
 
 # 临时文件
 *.tmp

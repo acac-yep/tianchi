@@ -41,6 +41,16 @@ PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 
+# =============================================================================
+# 日志工具
+# =============================================================================
+
+def log_print(*args, **kwargs):
+    """带时间戳的 print 函数"""
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    print(f"[{timestamp}]", *args, **kwargs)
+
+
 def parse_args():
     """解析命令行参数"""
     parser = argparse.ArgumentParser(
@@ -196,31 +206,31 @@ def main():
     
     # 设备
     device = torch.device(args.device if torch.cuda.is_available() else 'cpu')
-    print(f"使用设备: {device}")
+    log_print(f"使用设备: {device}")
     
     if device.type == 'cuda':
-        print(f"GPU: {torch.cuda.get_device_name(0)}")
-        print(f"显存: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f} GB")
+        log_print(f"GPU: {torch.cuda.get_device_name(0)}")
+        log_print(f"显存: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f} GB")
     
     # ========== 1. 加载数据 ==========
-    print("\n" + "=" * 60)
-    print("加载训练数据")
-    print("=" * 60)
+    log_print("\n" + "=" * 60)
+    log_print("加载训练数据")
+    log_print("=" * 60)
     
     train_path = Path(args.train_path)
     if not train_path.exists():
-        print(f"错误: 训练数据文件不存在: {train_path}")
-        print("请先运行 scripts/run_preprocessing.py 进行数据预处理")
+        log_print(f"错误: 训练数据文件不存在: {train_path}")
+        log_print("请先运行 scripts/run_preprocessing.py 进行数据预处理")
         sys.exit(1)
     
     df = pd.read_csv(train_path, sep='\t')
     texts = df['text'].tolist()
-    print(f"训练样本数: {len(texts):,}")
+    log_print(f"训练样本数: {len(texts):,}")
     
     # ========== 2. 创建 Dataset 和 DataLoader ==========
-    print("\n" + "=" * 60)
-    print("创建 Dataset 和 DataLoader")
-    print("=" * 60)
+    log_print("\n" + "=" * 60)
+    log_print("创建 Dataset 和 DataLoader")
+    log_print("=" * 60)
     
     from src.data_preprocess import (
         HATDataset,
@@ -246,7 +256,7 @@ def main():
         cache_segments=False,
     )
     
-    print(f"Dataset 大小: {len(train_dataset)}")
+    log_print(f"Dataset 大小: {len(train_dataset)}")
     
     # 创建 MLM Collator
     # 输出形状: input_ids [B, N, K], attention_mask [B, N, K], mlm_labels [B, N, K]
@@ -271,21 +281,21 @@ def main():
         drop_last=True,
     )
     
-    print(f"Batch size: {args.batch_size}")
-    print(f"Batches per epoch: {len(train_loader)}")
+    log_print(f"Batch size: {args.batch_size}")
+    log_print(f"Batches per epoch: {len(train_loader)}")
     
     # 验证一个 batch 的形状
     sample_batch = next(iter(train_loader))
-    print(f"\nBatch 形状验证（外部，不含 CLS）:")
-    print(f"  input_ids: {sample_batch['input_ids'].shape}")
-    print(f"  attention_mask: {sample_batch['attention_mask'].shape}")
-    print(f"  mlm_labels: {sample_batch['mlm_labels'].shape}")
-    print(f"  segment_mask: {sample_batch['segment_mask'].shape}")
+    log_print(f"\nBatch 形状验证（外部，不含 CLS）:")
+    log_print(f"  input_ids: {sample_batch['input_ids'].shape}")
+    log_print(f"  attention_mask: {sample_batch['attention_mask'].shape}")
+    log_print(f"  mlm_labels: {sample_batch['mlm_labels'].shape}")
+    log_print(f"  segment_mask: {sample_batch['segment_mask'].shape}")
     
     # ========== 3. 创建模型 ==========
-    print("\n" + "=" * 60)
-    print("创建 MLM 模型")
-    print("=" * 60)
+    log_print("\n" + "=" * 60)
+    log_print("创建 MLM 模型")
+    log_print("=" * 60)
     
     from src.model import create_mlm_model, HATConfig
     
@@ -293,18 +303,18 @@ def main():
     model = create_mlm_model(config)
     model.to(device)
     
-    print(f"模型参数量: {model.get_num_parameters():,}")
-    print(f"模型配置:")
-    print(f"  vocab_size: {config.vocab_size}")
-    print(f"  hidden_size: {config.hidden_size}")
-    print(f"  num_hat_layers: {config.num_hat_layers}")
-    print(f"  segment_length: {config.segment_length} (不含 CLS)")
-    print(f"  max_segments: {config.max_segments}")
+    log_print(f"模型参数量: {model.get_num_parameters():,}")
+    log_print(f"模型配置:")
+    log_print(f"  vocab_size: {config.vocab_size}")
+    log_print(f"  hidden_size: {config.hidden_size}")
+    log_print(f"  num_hat_layers: {config.num_hat_layers}")
+    log_print(f"  segment_length: {config.segment_length} (不含 CLS)")
+    log_print(f"  max_segments: {config.max_segments}")
     
     # ========== 4. 创建优化器和调度器 ==========
-    print("\n" + "=" * 60)
-    print("创建优化器和调度器")
-    print("=" * 60)
+    log_print("\n" + "=" * 60)
+    log_print("创建优化器和调度器")
+    log_print("=" * 60)
     
     optimizer = torch.optim.AdamW(
         model.parameters(),
@@ -324,15 +334,15 @@ def main():
         num_training_steps=num_training_steps,
     )
     
-    print(f"学习率: {args.lr}")
-    print(f"权重衰减: {args.weight_decay}")
-    print(f"Warmup 步数: {args.warmup_steps}")
-    print(f"总训练步数: {num_training_steps}")
+    log_print(f"学习率: {args.lr}")
+    log_print(f"权重衰减: {args.weight_decay}")
+    log_print(f"Warmup 步数: {args.warmup_steps}")
+    log_print(f"总训练步数: {num_training_steps}")
     
     # ========== 5. 训练循环 ==========
-    print("\n" + "=" * 60)
-    print("开始训练")
-    print("=" * 60)
+    log_print("\n" + "=" * 60)
+    log_print("开始训练")
+    log_print("=" * 60)
     
     # 创建输出目录
     output_dir = Path(args.output_dir)
@@ -345,7 +355,7 @@ def main():
     start_time = time.time()
     
     for epoch in range(args.num_epochs):
-        print(f"\n--- Epoch {epoch + 1}/{args.num_epochs} ---")
+        log_print(f"\n--- Epoch {epoch + 1}/{args.num_epochs} ---")
         
         for batch_idx, batch in enumerate(train_loader):
             # 移动数据到设备
@@ -368,7 +378,7 @@ def main():
             
             # 检查 loss 是否为 NaN
             if torch.isnan(loss):
-                print(f"警告: step {global_step} 出现 NaN loss，跳过")
+                log_print(f"警告: step {global_step} 出现 NaN loss，跳过")
                 continue
             
             # 反向传播
@@ -394,7 +404,7 @@ def main():
                 samples_per_sec = global_step * args.batch_size / elapsed
                 current_lr = scheduler.get_last_lr()[0]
                 
-                print(f"[Epoch {epoch+1}] "
+                log_print(f"[Epoch {epoch+1}] "
                       f"Step {global_step}/{num_training_steps} | "
                       f"Loss: {avg_loss:.4f} | "
                       f"LR: {current_lr:.2e} | "
@@ -418,7 +428,7 @@ def main():
                         'num_hat_layers': config.num_hat_layers,
                     },
                 }, ckpt_path)
-                print(f"  Checkpoint 已保存: {ckpt_path}")
+                log_print(f"  Checkpoint 已保存: {ckpt_path}")
             
             # 达到最大步数
             if global_step >= args.max_steps:
@@ -428,9 +438,9 @@ def main():
             break
     
     # ========== 6. 保存最终模型 ==========
-    print("\n" + "=" * 60)
-    print("保存最终模型")
-    print("=" * 60)
+    log_print("\n" + "=" * 60)
+    log_print("保存最终模型")
+    log_print("=" * 60)
     
     final_path = output_dir / 'hat_mlm_final.pt'
     torch.save({
@@ -445,15 +455,15 @@ def main():
             'max_segments': config.max_segments,
         },
     }, final_path)
-    print(f"最终模型已保存: {final_path}")
+    log_print(f"最终模型已保存: {final_path}")
     
     # 训练统计
     elapsed = time.time() - start_time
-    print(f"\n训练完成!")
-    print(f"  总步数: {global_step}")
-    print(f"  平均 Loss: {total_loss / global_step:.4f}")
-    print(f"  总耗时: {elapsed / 60:.1f} 分钟")
-    print(f"  平均速度: {global_step * args.batch_size / elapsed:.1f} samples/s")
+    log_print(f"\n训练完成!")
+    log_print(f"  总步数: {global_step}")
+    log_print(f"  平均 Loss: {total_loss / global_step:.4f}")
+    log_print(f"  总耗时: {elapsed / 60:.1f} 分钟")
+    log_print(f"  平均速度: {global_step * args.batch_size / elapsed:.1f} samples/s")
 
 
 if __name__ == '__main__':

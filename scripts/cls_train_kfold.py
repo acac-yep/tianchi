@@ -47,6 +47,17 @@ PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 
+# =============================================================================
+# 日志工具
+# =============================================================================
+
+def log_print(*args, **kwargs):
+    """带时间戳的 print 函数"""
+    from datetime import datetime
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    print(f"[{timestamp}]", *args, **kwargs)
+
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description='HAT 模型 K-Fold 交叉验证训练脚本',
@@ -254,16 +265,16 @@ def train_single_fold(
     fold_seed = args.seed + fold_idx * 1000
     set_seed(fold_seed)
     
-    print(f"\n{'='*60}")
-    print(f"Fold {fold_idx + 1}/{args.n_folds} (seed={fold_seed})")
-    print(f"{'='*60}")
+    log_print(f"\n{'='*60}")
+    log_print(f"Fold {fold_idx + 1}/{args.n_folds} (seed={fold_seed})")
+    log_print(f"{'='*60}")
     
     # 创建 fold 的训练集和验证集
     train_subset = Subset(full_dataset, train_indices)
     val_subset = Subset(full_dataset, val_indices)
     
-    print(f"训练集样本数: {len(train_subset):,}")
-    print(f"验证集样本数: {len(val_subset):,}")
+    log_print(f"训练集样本数: {len(train_subset):,}")
+    log_print(f"验证集样本数: {len(val_subset):,}")
     
     # DataLoader
     train_loader = DataLoader(
@@ -285,8 +296,8 @@ def train_single_fold(
         drop_last=False,
     )
     
-    print(f"Train batches/epoch: {len(train_loader)}")
-    print(f"Val batches/epoch: {len(val_loader)}")
+    log_print(f"Train batches/epoch: {len(train_loader)}")
+    log_print(f"Val batches/epoch: {len(val_loader)}")
     
     # 创建模型
     from src.model import create_model, HATConfig
@@ -297,13 +308,13 @@ def train_single_fold(
     
     # 加载 MLM 预训练权重（可选）
     if args.mlm_ckpt and Path(args.mlm_ckpt).exists():
-        print(f"\n加载 MLM 预训练权重: {args.mlm_ckpt}")
+        log_print(f"\n加载 MLM 预训练权重: {args.mlm_ckpt}")
         ckpt = torch.load(args.mlm_ckpt, map_location='cpu')
         mlm_state_dict = ckpt.get('model_state_dict', ckpt)
         missing, unexpected = model.load_state_dict(mlm_state_dict, strict=False)
-        print(f"  加载完成，missing keys: {len(missing)}, unexpected keys: {len(unexpected)}")
+        log_print(f"  加载完成，missing keys: {len(missing)}, unexpected keys: {len(unexpected)}")
     else:
-        print("\n未提供或找不到 MLM 预训练权重，将从随机初始化开始训练。")
+        log_print("\n未提供或找不到 MLM 预训练权重，将从随机初始化开始训练。")
     
     # 损失函数
     loss_fn = torch.nn.CrossEntropyLoss(weight=class_weights_tensor)
@@ -325,8 +336,8 @@ def train_single_fold(
         num_training_steps=total_steps,
     )
     
-    print(f"\n总训练步数: {total_steps}, warmup 步数: {warmup_steps}")
-    print(f"学习率: {args.lr}, weight_decay: {args.weight_decay}")
+    log_print(f"\n总训练步数: {total_steps}, warmup 步数: {warmup_steps}")
+    log_print(f"学习率: {args.lr}, weight_decay: {args.weight_decay}")
     
     # 训练循环
     output_dir = Path(args.output_dir)
@@ -337,7 +348,7 @@ def train_single_fold(
     start_time = time.time()
     
     for epoch in range(args.num_epochs):
-        print(f"\n========== Fold {fold_idx + 1} | Epoch {epoch+1}/{args.num_epochs} ==========")
+        log_print(f"\n========== Fold {fold_idx + 1} | Epoch {epoch+1}/{args.num_epochs} ==========")
         model.train()
         running_loss = 0.0
         
@@ -357,7 +368,7 @@ def train_single_fold(
             loss = loss_fn(logits, labels)
             
             if torch.isnan(loss):
-                print(f"警告: step {global_step} 出现 NaN loss，跳过")
+                log_print(f"警告: step {global_step} 出现 NaN loss，跳过")
                 continue
             
             loss.backward()
@@ -375,7 +386,7 @@ def train_single_fold(
                 elapsed = time.time() - start_time
                 samples_per_sec = global_step * args.batch_size / elapsed
                 
-                print(
+                log_print(
                     f"[Fold {fold_idx + 1} | Epoch {epoch+1}] "
                     f"Step {global_step}/{total_steps} | "
                     f"Train Loss: {avg_loss:.4f} | "
@@ -387,7 +398,7 @@ def train_single_fold(
         
         # 每个 epoch 结束做一次验证
         val_loss, val_acc, val_f1 = evaluate(model, val_loader, device, loss_fn=loss_fn)
-        print(
+        log_print(
             f"\n[Eval] Fold {fold_idx + 1} | Epoch {epoch+1} | "
             f"Val Loss: {val_loss:.4f} | "
             f"Val Acc: {val_acc:.4f} | "
@@ -411,17 +422,17 @@ def train_single_fold(
                 },
                 best_path,
             )
-            print(f"  >> 新最佳模型，已保存到: {best_path}")
+            log_print(f"  >> 新最佳模型，已保存到: {best_path}")
     
     elapsed = time.time() - start_time
-    print(f"\nFold {fold_idx + 1} 训练完成！总步数: {global_step}, 最佳 Val Macro-F1: {best_val_f1:.4f}")
-    print(f"耗时: {elapsed / 60:.1f} 分钟")
+    log_print(f"\nFold {fold_idx + 1} 训练完成！总步数: {global_step}, 最佳 Val Macro-F1: {best_val_f1:.4f}")
+    log_print(f"耗时: {elapsed / 60:.1f} 分钟")
     
     # 确保模型已保存
     best_model_path = output_dir / f"hat_cls_fold{fold_idx}_best.pt"
     if not best_model_path.exists():
         # 如果模型未保存，保存当前模型
-        print(f"警告: 模型文件不存在，保存当前模型...")
+        log_print(f"警告: 模型文件不存在，保存当前模型...")
         torch.save(
             {
                 'fold': fold_idx,
@@ -437,7 +448,7 @@ def train_single_fold(
     del model, optimizer, scheduler, loss_fn
     if device.type == 'cuda':
         torch.cuda.empty_cache()
-        print(f"已清理 GPU 显存")
+        log_print(f"已清理 GPU 显存")
     
     return best_val_f1, best_model_path
 
@@ -449,34 +460,34 @@ def main():
     set_seed(args.seed)
     
     device = torch.device(args.device if torch.cuda.is_available() else 'cpu')
-    print(f"使用设备: {device}")
+    log_print(f"使用设备: {device}")
     if device.type == 'cuda':
-        print(f"GPU: {torch.cuda.get_device_name(0)}")
-        print(f"显存: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f} GB")
+        log_print(f"GPU: {torch.cuda.get_device_name(0)}")
+        log_print(f"显存: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f} GB")
     
     # ========== 1. 读数据 ==========
     train_df = pd.read_csv(args.train_path, sep='\t')
-    print(f"训练样本数: {len(train_df):,}")
+    log_print(f"训练样本数: {len(train_df):,}")
     
     train_texts = train_df['text'].tolist()
     train_labels = train_df['label'].astype(int).tolist()
     
     # ========== 2. K-Fold 划分 ==========
-    print(f"\n使用 Stratified K-Fold (K={args.n_folds}, seed={args.fold_seed}) 划分数据...")
+    log_print(f"\n使用 Stratified K-Fold (K={args.n_folds}, seed={args.fold_seed}) 划分数据...")
     skf = StratifiedKFold(n_splits=args.n_folds, shuffle=True, random_state=args.fold_seed)
     
     # 获取所有 fold 的划分
     fold_splits = list(skf.split(train_texts, train_labels))
     
-    print(f"\n各 Fold 样本分布:")
+    log_print(f"\n各 Fold 样本分布:")
     for fold_idx, (train_idx, val_idx) in enumerate(fold_splits):
         train_labels_fold = np.array(train_labels)[train_idx]
         val_labels_fold = np.array(train_labels)[val_idx]
         train_label_dist = np.bincount(train_labels_fold)
         val_label_dist = np.bincount(val_labels_fold)
-        print(f"  Fold {fold_idx + 1}: 训练集 {len(train_idx):,} 样本, 验证集 {len(val_idx):,} 样本")
-        print(f"    训练集标签分布: {train_label_dist}")
-        print(f"    验证集标签分布: {val_label_dist}")
+        log_print(f"  Fold {fold_idx + 1}: 训练集 {len(train_idx):,} 样本, 验证集 {len(val_idx):,} 样本")
+        log_print(f"    训练集标签分布: {train_label_dist}")
+        log_print(f"    验证集标签分布: {val_label_dist}")
     
     # ========== 3. 创建完整数据集 ==========
     from src.data_preprocess import (
@@ -506,7 +517,7 @@ def main():
     
     class_weights = np.load(args.class_weights).astype('float32')  # [num_labels]
     class_weights_tensor = torch.tensor(class_weights, dtype=torch.float32, device=device)
-    print(f"\n类别权重示例: {class_weights[:5]} ...")
+    log_print(f"\n类别权重示例: {class_weights[:5]} ...")
     
     # ========== 5. 训练每个 Fold ==========
     output_dir = Path(args.output_dir)
@@ -517,7 +528,7 @@ def main():
         torch.cuda.empty_cache()
         import gc
         gc.collect()
-        print(f"\n已清理初始显存，准备开始 K-Fold 训练...")
+        log_print(f"\n已清理初始显存，准备开始 K-Fold 训练...")
     
     fold_results = []
     total_start_time = time.time()
@@ -546,15 +557,15 @@ def main():
             torch.cuda.empty_cache()
             import gc
             gc.collect()
-            print(f"\n已清理显存，准备训练下一个 fold...")
+            log_print(f"\n已清理显存，准备训练下一个 fold...")
     
     # ========== 6. 总结 ==========
     total_elapsed = time.time() - total_start_time
-    print(f"\n{'='*60}")
-    print(f"K-Fold 训练完成！")
-    print(f"{'='*60}")
-    print(f"总耗时: {total_elapsed / 60:.1f} 分钟")
-    print(f"\n各 Fold 最佳验证集 Macro-F1:")
+    log_print(f"\n{'='*60}")
+    log_print(f"K-Fold 训练完成！")
+    log_print(f"{'='*60}")
+    log_print(f"总耗时: {total_elapsed / 60:.1f} 分钟")
+    log_print(f"\n各 Fold 最佳验证集 Macro-F1:")
     
     all_f1s = []
     for result in fold_results:
@@ -562,17 +573,17 @@ def main():
         best_f1 = result['best_val_f1']
         model_path = result['model_path']
         all_f1s.append(best_f1)
-        print(f"  Fold {fold_idx + 1}: {best_f1:.4f} -> {model_path}")
+        log_print(f"  Fold {fold_idx + 1}: {best_f1:.4f} -> {model_path}")
     
     mean_f1 = np.mean(all_f1s)
     std_f1 = np.std(all_f1s)
-    print(f"\n平均 Macro-F1: {mean_f1:.4f} ± {std_f1:.4f}")
-    print(f"\n所有模型已保存到: {output_dir}")
-    print(f"\n推理时使用以下命令进行 Ensemble:")
-    print(f"  python scripts/infer.py \\")
-    print(f"    --test-path data/processed/test.csv \\")
-    print(f"    --model-paths {output_dir}/hat_cls_fold0_best.pt,{output_dir}/hat_cls_fold1_best.pt,... \\")
-    print(f"    --output-path outputs/submission/submission_kfold.csv")
+    log_print(f"\n平均 Macro-F1: {mean_f1:.4f} ± {std_f1:.4f}")
+    log_print(f"\n所有模型已保存到: {output_dir}")
+    log_print(f"\n推理时使用以下命令进行 Ensemble:")
+    log_print(f"  python scripts/infer.py \\")
+    log_print(f"    --test-path data/processed/test.csv \\")
+    log_print(f"    --model-paths {output_dir}/hat_cls_fold0_best.pt,{output_dir}/hat_cls_fold1_best.pt,... \\")
+    log_print(f"    --output-path outputs/submission/submission_kfold.csv")
 
 
 if __name__ == "__main__":

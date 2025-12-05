@@ -36,6 +36,17 @@ PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 
+# =============================================================================
+# 日志工具
+# =============================================================================
+
+def log_print(*args, **kwargs):
+    """带时间戳的 print 函数"""
+    from datetime import datetime
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    print(f"[{timestamp}]", *args, **kwargs)
+
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description='HAT 模型分类微调脚本',
@@ -217,17 +228,17 @@ def main():
     set_seed(args.seed)
 
     device = torch.device(args.device if torch.cuda.is_available() else 'cpu')
-    print(f"使用设备: {device}")
+    log_print(f"使用设备: {device}")
     if device.type == 'cuda':
-        print(f"GPU: {torch.cuda.get_device_name(0)}")
-        print(f"显存: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f} GB")
+        log_print(f"GPU: {torch.cuda.get_device_name(0)}")
+        log_print(f"显存: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f} GB")
 
     # ========== 1. 读数据 ==========
     train_df = pd.read_csv(args.train_path, sep='\t')
     val_df = pd.read_csv(args.val_path, sep='\t')
 
-    print(f"训练样本数: {len(train_df):,}")
-    print(f"验证样本数: {len(val_df):,}")
+    log_print(f"训练样本数: {len(train_df):,}")
+    log_print(f"验证样本数: {len(val_df):,}")
 
     train_texts = train_df['text'].tolist()
     train_labels = train_df['label'].astype(int).tolist()
@@ -285,8 +296,8 @@ def main():
         drop_last=False,
     )
 
-    print(f"\nTrain batches/epoch: {len(train_loader)}")
-    print(f"Val batches/epoch: {len(val_loader)}")
+    log_print(f"\nTrain batches/epoch: {len(train_loader)}")
+    log_print(f"Val batches/epoch: {len(val_loader)}")
 
     # ========== 3. 创建模型 ==========
     from src.model import create_model, HATConfig
@@ -295,19 +306,19 @@ def main():
     model = create_model(config)  # HATInterleaved512ForClassification
     model.to(device)
 
-    print(f"\n模型参数量: {model.get_num_parameters():,}")
-    print(f"num_labels: {config.num_labels}")
+    log_print(f"\n模型参数量: {model.get_num_parameters():,}")
+    log_print(f"num_labels: {config.num_labels}")
 
     # ========== 4. 加载 MLM 预训练权重（可选） ==========
     if args.mlm_ckpt and Path(args.mlm_ckpt).exists():
-        print(f"\n加载 MLM 预训练权重: {args.mlm_ckpt}")
+        log_print(f"\n加载 MLM 预训练权重: {args.mlm_ckpt}")
         ckpt = torch.load(args.mlm_ckpt, map_location='cpu')
         mlm_state_dict = ckpt.get('model_state_dict', ckpt)
         # 直接 strict=False 加载，分类头保留随机初始化
         missing, unexpected = model.load_state_dict(mlm_state_dict, strict=False)
-        print(f"  加载完成，missing keys: {len(missing)}, unexpected keys: {len(unexpected)}")
+        log_print(f"  加载完成，missing keys: {len(missing)}, unexpected keys: {len(unexpected)}")
     else:
-        print("\n未提供或找不到 MLM 预训练权重，将从随机初始化开始训练。")
+        log_print("\n未提供或找不到 MLM 预训练权重，将从随机初始化开始训练。")
 
     # ========== 5. 类别权重 & 优化器 & 调度器 ==========
     if not Path(args.class_weights).exists():
@@ -315,7 +326,7 @@ def main():
     
     class_weights = np.load(args.class_weights).astype('float32')  # [num_labels]
     class_weights_tensor = torch.tensor(class_weights, dtype=torch.float32, device=device)
-    print(f"\n类别权重示例: {class_weights[:5]} ...")
+    log_print(f"\n类别权重示例: {class_weights[:5]} ...")
 
     # 使用带权重的损失函数（用于训练和验证）
     loss_fn = torch.nn.CrossEntropyLoss(weight=class_weights_tensor)
@@ -336,8 +347,8 @@ def main():
         num_training_steps=total_steps,
     )
 
-    print(f"\n总训练步数: {total_steps}, warmup 步数: {warmup_steps}")
-    print(f"学习率: {args.lr}, weight_decay: {args.weight_decay}")
+    log_print(f"\n总训练步数: {total_steps}, warmup 步数: {warmup_steps}")
+    log_print(f"学习率: {args.lr}, weight_decay: {args.weight_decay}")
 
     # ========== 6. 训练循环 ==========
     output_dir = Path(args.output_dir)
@@ -348,7 +359,7 @@ def main():
     start_time = time.time()
 
     for epoch in range(args.num_epochs):
-        print(f"\n========== Epoch {epoch+1}/{args.num_epochs} ==========")
+        log_print(f"\n========== Epoch {epoch+1}/{args.num_epochs} ==========")
         model.train()
         running_loss = 0.0
 
@@ -370,7 +381,7 @@ def main():
             loss = loss_fn(logits, labels)
 
             if torch.isnan(loss):
-                print(f"警告: step {global_step} 出现 NaN loss，跳过")
+                log_print(f"警告: step {global_step} 出现 NaN loss，跳过")
                 continue
 
             loss.backward()
@@ -388,7 +399,7 @@ def main():
                 elapsed = time.time() - start_time
                 samples_per_sec = global_step * args.batch_size / elapsed
 
-                print(
+                log_print(
                     f"[Epoch {epoch+1}] "
                     f"Step {global_step}/{total_steps} | "
                     f"Train Loss: {avg_loss:.4f} | "
@@ -400,7 +411,7 @@ def main():
 
         # ===== 每个 epoch 结束做一次验证 =====
         val_loss, val_acc, val_f1 = evaluate(model, val_loader, device, loss_fn=loss_fn)
-        print(
+        log_print(
             f"\n[Eval] Epoch {epoch+1} | "
             f"Val Loss: {val_loss:.4f} | "
             f"Val Acc: {val_acc:.4f} | "
@@ -423,11 +434,11 @@ def main():
                 },
                 best_path,
             )
-            print(f"  >> 新最佳模型，已保存到: {best_path}")
+            log_print(f"  >> 新最佳模型，已保存到: {best_path}")
 
     elapsed = time.time() - start_time
-    print(f"\n训练完成！总步数: {global_step}, 最佳 Val Macro-F1: {best_val_f1:.4f}")
-    print(f"总耗时: {elapsed / 60:.1f} 分钟")
+    log_print(f"\n训练完成！总步数: {global_step}, 最佳 Val Macro-F1: {best_val_f1:.4f}")
+    log_print(f"总耗时: {elapsed / 60:.1f} 分钟")
 
 
 if __name__ == "__main__":
