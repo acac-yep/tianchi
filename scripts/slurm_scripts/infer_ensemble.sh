@@ -59,7 +59,7 @@ export PYTHONUNBUFFERED=1
 # ============================================================================
 
 # Checkpoint 目录（会自动扫描该目录下所有 hat_cls_best.pt）
-CHECKPOINT_DIR="checkpoints/ensemble_focal"
+CHECKPOINT_DIR="checkpoints/diverse_ensemble"
 
 # 或者手动指定模型列表（取消注释使用）
 # MANUAL_MODEL_PATHS="checkpoints/cls_hat512/seed42_best.pt,checkpoints/cls_hat512/seed3407_best.pt"
@@ -90,11 +90,17 @@ if [ -n "$MANUAL_MODEL_PATHS" ]; then
     echo "使用手动指定的模型路径"
 else
     echo "扫描目录: ${CHECKPOINT_DIR}"
+    # 先尝试找 best，如果没找到则用 last
     MODEL_PATHS=$(find "$CHECKPOINT_DIR" -name "hat_cls_best.pt" 2>/dev/null | sort | tr '\n' ',' | sed 's/,$//')
     
     if [ -z "$MODEL_PATHS" ]; then
-        echo "错误: 在 ${CHECKPOINT_DIR} 目录下未找到 hat_cls_best.pt 文件"
-        exit 1
+        echo "⚠️  未找到 hat_cls_best.pt，尝试使用 hat_cls_last.pt 作为备选..."
+        MODEL_PATHS=$(find "$CHECKPOINT_DIR" -name "hat_cls_last.pt" 2>/dev/null | sort | tr '\n' ',' | sed 's/,$//')
+        
+        if [ -z "$MODEL_PATHS" ]; then
+            echo "错误: 在 ${CHECKPOINT_DIR} 目录下未找到任何 checkpoint 文件 (hat_cls_best.pt 或 hat_cls_last.pt)"
+            exit 1
+        fi
     fi
 fi
 

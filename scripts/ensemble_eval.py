@@ -119,9 +119,17 @@ def parse_args():
     parser.add_argument(
         '--ensemble-method',
         type=str,
-        choices=['logits_avg', 'prob_avg', 'voting'],
+        choices=['logits_avg', 'prob_avg', 'voting', 'temp_scaled'],
         default='logits_avg',
-        help='Ensemble 方法: logits_avg (logits平均), prob_avg (概率平均), voting (投票)'
+        help='Ensemble 方法: logits_avg, prob_avg, voting, temp_scaled (温度缩放)'
+    )
+    
+    # 温度缩放参数
+    parser.add_argument(
+        '--temperature',
+        type=float,
+        default=1.5,
+        help='温度缩放系数 (仅 temp_scaled 方法使用，建议 1.5-2.0)'
     )
     
     return parser.parse_args()
@@ -129,11 +137,28 @@ def parse_args():
 
 def find_checkpoints(checkpoint_dir: str) -> List[str]:
     """
-    在指定目录下扫描所有 hat_cls_best.pt 文件
+    在指定目录下扫描所有 checkpoint 文件
+    
+    优先级：
+    1. hat_cls_best.pt (最佳模型)
+    2. hat_cls_last.pt (最后模型，作为备选)
     """
-    pattern = os.path.join(checkpoint_dir, '**/hat_cls_best.pt')
-    ckpts = glob.glob(pattern, recursive=True)
-    ckpts = sorted(ckpts)  # 按路径排序
+    # 先找 best
+    pattern_best = os.path.join(checkpoint_dir, '**/hat_cls_best.pt')
+    ckpts_best = glob.glob(pattern_best, recursive=True)
+    
+    # 如果没找到 best，找 last
+    if not ckpts_best:
+        pattern_last = os.path.join(checkpoint_dir, '**/hat_cls_last.pt')
+        ckpts_last = glob.glob(pattern_last, recursive=True)
+        if ckpts_last:
+            print(f"⚠️  未找到 hat_cls_best.pt，使用 hat_cls_last.pt 作为备选")
+            ckpts = sorted(ckpts_last)
+        else:
+            ckpts = []
+    else:
+        ckpts = sorted(ckpts_best)
+    
     return ckpts
 
 
@@ -232,6 +257,7 @@ def ensemble_predict(
     data_loader: DataLoader,
     device: torch.device,
     method: str = 'logits_avg',
+    temperature: float = 1.5,
 ) -> Dict[str, np.ndarray]:
     """
     使用 ensemble 进行预测
@@ -255,7 +281,8 @@ def ensemble_predict(
     all_logits_list = [[] for _ in models]  # 每个模型的 logits
     all_labels = []
     
-    print(f"\n开始 Ensemble 推理 (method={method}, {len(models)} models)...")
+    temp_str = f", T={temperature}" if method == 'temp_scaled' else ""
+    print(f"\n开始 Ensemble 推理 (method={method}{temp_str}, {len(models)} models)...")
     
     for batch in tqdm(data_loader, desc="Inference"):
         input_ids = batch['input_ids'].to(device)
@@ -308,6 +335,15 @@ def ensemble_predict(
             predictions.append(vote_counts.argmax())
         predictions = np.array(predictions)
         ensemble_logits = stacked_logits.mean(dim=0)  # 仍然保存平均 logits 用于分析
+    
+    elif method == 'temp_scaled':
+        # 温度缩放 + soft voting
+        # 先对 logits 做温度缩放，使概率分布更平滑
+        scaled_logits = stacked_logits / temperature  # [num_models, N, C]
+        probs = torch.softmax(scaled_logits, dim=-1)  # [num_models, N, C]
+        ensemble_probs = probs.mean(dim=0)  # [N, C]
+        ensemble_logits = torch.log(ensemble_probs + 1e-10)
+        predictions = ensemble_probs.argmax(dim=-1).numpy()
     
     else:
         raise ValueError(f"Unknown ensemble method: {method}")
@@ -482,6 +518,7 @@ def main():
         results = ensemble_predict(
             models, val_loader, device,
             method=args.ensemble_method,
+            temperature=args.temperature,
         )
         
         # 评估
@@ -519,6 +556,7 @@ def main():
         test_results = ensemble_predict(
             models, test_loader, device,
             method=args.ensemble_method,
+            temperature=args.temperature,
         )
         
         # 保存测试集预测
