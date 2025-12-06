@@ -15,6 +15,7 @@ K-Fold 模型推理辅助脚本
 import os
 import sys
 import argparse
+import re
 import subprocess
 from pathlib import Path
 
@@ -106,25 +107,42 @@ def parse_args():
     return parser.parse_args()
 
 
+def _extract_fold_idx(path: Path) -> int:
+    """从文件名中提取 fold 编号"""
+    m = re.search(r"hat_cls_fold(\d+)", path.name)
+    if not m:
+        return -1
+    return int(m.group(1))
+
+
 def find_kfold_models(kfold_dir: Path) -> list:
-    """扫描 K-fold 目录，找到所有 fold 模型"""
+    """扫描 K-fold 目录，优先返回 Stage2 模型，否则回退 Stage1"""
     kfold_dir = Path(kfold_dir)
     
     if not kfold_dir.exists():
         raise FileNotFoundError(f"K-fold 目录不存在: {kfold_dir}")
     
-    # 查找所有 hat_cls_fold{k}_best.pt 文件
-    model_files = sorted(kfold_dir.glob("hat_cls_fold*_best.pt"))
+    stage2_files = { _extract_fold_idx(p): p for p in kfold_dir.glob("hat_cls_fold*_stage2_best.pt") }
+    stage1_files = { _extract_fold_idx(p): p for p in kfold_dir.glob("hat_cls_fold*_best.pt") }
     
-    if not model_files:
+    all_folds = sorted(set(stage1_files.keys()) | set(stage2_files.keys()))
+    if not all_folds:
         raise FileNotFoundError(
-            f"在 {kfold_dir} 中未找到任何 hat_cls_fold*_best.pt 文件"
+            f"在 {kfold_dir} 中未找到 hat_cls_fold*_stage2_best.pt 或 hat_cls_fold*_best.pt"
         )
     
-    log_print(f"找到 {len(model_files)} 个 K-fold 模型:")
-    for i, model_path in enumerate(model_files):
-        log_print(f"  [{i+1}] {model_path}")
+    model_files = []
+    for fold in all_folds:
+        if fold in stage2_files:
+            model_files.append(stage2_files[fold])
+            log_print(f"Fold {fold}: 使用 Stage2 {stage2_files[fold]}")
+        elif fold in stage1_files:
+            model_files.append(stage1_files[fold])
+            log_print(f"Fold {fold}: Stage2 缺失，回退 Stage1 {stage1_files[fold]}")
+        else:
+            raise FileNotFoundError(f"Fold {fold} 缺少模型文件")
     
+    log_print(f"共选用 {len(model_files)} 个模型用于 ensemble")
     return [str(p) for p in model_files]
 
 
