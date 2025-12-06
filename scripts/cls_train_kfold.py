@@ -65,7 +65,7 @@ import numpy as np
 import pandas as pd
 import torch
 from torch.utils.data import DataLoader, Subset, WeightedRandomSampler
-from torch.cuda.amp import autocast, GradScaler
+from torch.cuda.amp import GradScaler
 
 from sklearn.metrics import f1_score, accuracy_score
 from sklearn.model_selection import StratifiedKFold
@@ -377,8 +377,8 @@ def evaluate(model, data_loader, device, loss_fn, use_amp=False):
         attention_mask = batch['attention_mask'].to(device)
         labels = batch['labels'].to(device)            # [B]
 
-        # 使用 autocast 进行混合精度推理（如果启用）
-        with autocast(enabled=use_amp):
+        # 使用 torch.amp.autocast 进行混合精度推理（如果启用）
+        with torch.amp.autocast(device_type=device.type, enabled=use_amp):
             # 模型返回字典格式 {"logits": logits}
             outputs = model(
                 input_ids=input_ids,
@@ -575,10 +575,11 @@ def train_single_fold(
             labels = batch['labels'].to(device)
             
             optimizer.zero_grad()
+            optimizer_was_run = True
             
             # 使用 AMP 进行混合精度训练
             if args.use_amp:
-                with autocast():
+                with torch.amp.autocast(device_type=device.type):
                     outputs = model(
                         input_ids=input_ids,
                         attention_mask=attention_mask,
@@ -595,7 +596,7 @@ def train_single_fold(
                 if args.grad_clip > 0:
                     scaler.unscale_(optimizer)
                     torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
-                scaler.step(optimizer)
+                optimizer_was_run = scaler.step(optimizer)
                 scaler.update()
             else:
                 # 标准精度训练
@@ -615,7 +616,9 @@ def train_single_fold(
                     torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
                 optimizer.step()
             
-            scheduler.step()
+            # 仅在优化器实际运行时再推进 scheduler，避免跳过首个 lr
+            if optimizer_was_run or optimizer_was_run is None:  # 兼容旧版返回 None
+                scheduler.step()
             
             # 更新 EMA 权重（如果启用）
             if ema is not None:

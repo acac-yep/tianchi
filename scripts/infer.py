@@ -126,16 +126,22 @@ def parse_args():
     parser.add_argument(
         '--window-agg',
         type=str,
-        choices=['mean', 'max'],
+        choices=['mean', 'max', 'mean_conf'],
         default='mean',
-        help='窗口级聚合方式: mean (平均), max (取最大)'
+        help='窗口级聚合方式: mean / max / mean_conf(按窗口置信度加权平均)'
     )
     parser.add_argument(
         '--model-agg',
         type=str,
-        choices=['logits_avg', 'prob_avg', 'voting'],
+        choices=[
+            'logits_avg',          # logits 均值
+            'prob_avg',            # 概率均值
+            'voting',              # 投票
+            'logits_avg_weighted', # 按模型权重加权 logits 均值
+            'prob_avg_weighted',   # 按模型权重加权概率均值
+        ],
         default='logits_avg',
-        help='模型级聚合方式: logits_avg, prob_avg, voting'
+        help='模型级聚合方式: logits_avg / prob_avg / voting / *_weighted(按验证集指标加权)'
     )
     
     # 可选: 保存详细 logits 用于调试/分析
@@ -296,21 +302,22 @@ class InferenceCollator:
 # 模型加载
 # =============================================================================
 
-def load_models(model_paths: str, device: torch.device) -> List[torch.nn.Module]:
+def load_models(model_paths: str, device: torch.device) -> Tuple[List[torch.nn.Module], np.ndarray]:
     """
-    加载多个模型 checkpoint
+    加载多个模型 checkpoint，并返回模型及其权重
     
     Args:
         model_paths: 逗号分隔的 checkpoint 路径
         device: 目标设备
         
     Returns:
-        模型列表
+        (模型列表, 模型权重数组)，权重来源于 checkpoint 的 val_macro_f1
     """
     from src.model import create_model, HATConfig
     
     paths = [p.strip() for p in model_paths.split(',') if p.strip()]
-    models = []
+    models: List[torch.nn.Module] = []
+    model_scores: List[float] = []
     config = HATConfig()
     
     log_print(f"\n加载 {len(paths)} 个模型...")
@@ -333,14 +340,27 @@ def load_models(model_paths: str, device: torch.device) -> List[torch.nn.Module]
         model.to(device)
         model.eval()
         
-        # 打印 checkpoint 信息
-        if 'val_macro_f1' in ckpt:
-            log_print(f"      Val Macro-F1: {ckpt['val_macro_f1']:.4f}")
+        # 打印 checkpoint 信息并记录作为权重
+        score = ckpt.get('val_macro_f1', None)
+        if score is not None:
+            log_print(f"      Val Macro-F1: {score:.4f}")
+            model_scores.append(float(score))
+        else:
+            log_print("      (未找到 val_macro_f1，将使用均匀权重)")
+            model_scores.append(1.0)
         
         models.append(model)
     
     log_print(f"  共加载 {len(models)} 个模型")
-    return models
+    
+    scores = np.asarray(model_scores, dtype=np.float32)
+    if scores.sum() <= 0:
+        weights = np.ones_like(scores) / len(scores)
+    else:
+        weights = scores / scores.sum()
+    
+    log_print(f"  模型权重: {weights.tolist()}")
+    return models, weights
 
 
 # =============================================================================
@@ -399,6 +419,12 @@ def infer_single_model(
             agg_logits = stacked.mean(dim=0)  # [num_labels]
         elif window_agg == 'max':
             agg_logits = stacked.max(dim=0).values  # [num_labels]
+        elif window_agg == 'mean_conf':
+            # 用窗口最大类别概率作为置信度做加权平均
+            probs = torch.softmax(stacked, dim=-1)       # [W, num_labels]
+            conf = probs.max(dim=-1).values              # [W]
+            weights = conf / (conf.sum() + 1e-12)        # 归一化
+            agg_logits = (stacked * weights.view(-1, 1)).sum(dim=0)
         else:
             raise ValueError(f"Unknown window aggregation: {window_agg}")
         
@@ -419,6 +445,7 @@ def run_inference(
     num_labels: int,
     window_agg: str = 'mean',
     model_agg: str = 'logits_avg',
+    model_weights: Optional[np.ndarray] = None,
 ) -> Tuple[Dict[int, int], Dict[int, np.ndarray]]:
     """
     多模型 ensemble 推理
@@ -445,6 +472,11 @@ def run_inference(
     
     log_print(f"\n开始 Ensemble 推理 (window_agg={window_agg}, model_agg={model_agg})...")
     
+    # 预处理模型权重
+    weight_tensor: Optional[torch.Tensor] = None
+    if model_weights is not None:
+        weight_tensor = torch.as_tensor(model_weights, dtype=torch.float32)
+    
     for i, model in enumerate(models):
         log_print(f"\n  模型 [{i+1}/{len(models)}] 推理中...")
         
@@ -466,15 +498,37 @@ def run_inference(
     for doc_id, logit_list in logits_dict.items():
         stacked = torch.stack(logit_list, dim=0)  # [M, num_labels]
         
+        # 对齐权重长度（正常情况下 M==模型数）
+        w = None
+        if weight_tensor is not None and weight_tensor.numel() >= stacked.size(0):
+            w = weight_tensor[: stacked.size(0)]
+            w = w / (w.sum() + 1e-12)  # 归一化
+        
         if model_agg == 'logits_avg':
             # Logits 平均
             agg_logits = stacked.mean(dim=0)  # [num_labels]
+            label = agg_logits.argmax(dim=-1).item()
+            
+        elif model_agg == 'logits_avg_weighted':
+            if w is None:
+                agg_logits = stacked.mean(dim=0)
+            else:
+                agg_logits = (stacked * w.view(-1, 1)).sum(dim=0)
             label = agg_logits.argmax(dim=-1).item()
             
         elif model_agg == 'prob_avg':
             # 概率平均（softmax 后平均）
             probs = torch.softmax(stacked, dim=-1)  # [M, num_labels]
             agg_probs = probs.mean(dim=0)  # [num_labels]
+            agg_logits = torch.log(agg_probs + 1e-10)
+            label = agg_probs.argmax(dim=-1).item()
+            
+        elif model_agg == 'prob_avg_weighted':
+            probs = torch.softmax(stacked, dim=-1)  # [M, num_labels]
+            if w is None:
+                agg_probs = probs.mean(dim=0)
+            else:
+                agg_probs = (probs * w.view(-1, 1)).sum(dim=0)
             agg_logits = torch.log(agg_probs + 1e-10)
             label = agg_probs.argmax(dim=-1).item()
             
@@ -560,6 +614,7 @@ def evaluate_on_val(
     num_workers: int,
     window_agg: str,
     model_agg: str,
+    model_weights: Optional[np.ndarray] = None,
 ) -> None:
     """
     在验证集上评估（sanity check）
@@ -599,7 +654,13 @@ def evaluate_on_val(
     
     # 推理
     preds, _ = run_inference(
-        models, val_loader, device, num_labels, window_agg, model_agg
+        models=models,
+        test_loader=val_loader,
+        device=device,
+        num_labels=num_labels,
+        window_agg=window_agg,
+        model_agg=model_agg,
+        model_weights=model_weights,
     )
     
     # 评估
@@ -627,7 +688,7 @@ def main():
         log_print(f"  显存: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f} GB")
     
     # ========== 1. 加载模型 ==========
-    models = load_models(args.model_paths, device)
+    models, model_weights = load_models(args.model_paths, device)
     
     # 获取 num_labels
     from src.common_config import COMMON_CONFIG
@@ -645,6 +706,7 @@ def main():
             num_workers=args.num_workers,
             window_agg=args.window_agg,
             model_agg=args.model_agg,
+            model_weights=model_weights,
         )
     
     # ========== 3. 构建测试集 DataLoader ==========
@@ -690,6 +752,7 @@ def main():
         num_labels=num_labels,
         window_agg=args.window_agg,
         model_agg=args.model_agg,
+        model_weights=model_weights,
     )
     
     elapsed = time.time() - start_time

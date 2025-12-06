@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH -J cls_kfold
+#SBATCH -J test
 #SBATCH -p gpu
 #SBATCH -N 1
 #SBATCH --gpus-per-node=1
@@ -94,7 +94,7 @@ BATCH_SIZE=32
 EVAL_BATCH_SIZE=64
 LR=3e-5
 WEIGHT_DECAY=0.01
-NUM_EPOCHS=5
+NUM_EPOCHS=10
 WARMUP_RATIO=0.06
 LOG_EVERY=50
 GRAD_CLIP=1.0
@@ -108,7 +108,7 @@ FOCAL_GAMMA=2.0              # Focal Loss 的 gamma 参数
 USE_WEIGHTED_SAMPLER=false   # 是否使用 WeightedRandomSampler（true/false）
 
 # Early Stopping
-EARLY_STOPPING_PATIENCE=""   # Early stopping patience（留空表示不使用，例如: 2）
+EARLY_STOPPING_PATIENCE=2    # Early stopping patience（留空表示不使用，例如: 2）
 
 # AMP (混合精度训练)
 USE_AMP=true                 # 是否使用混合精度训练（推荐 true）

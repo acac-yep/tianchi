@@ -78,17 +78,23 @@ def parse_args():
     parser.add_argument(
         '--window-agg',
         type=str,
-        choices=['mean', 'max'],
+        choices=['mean', 'max', 'mean_conf'],
         default='mean',
-        help='窗口级聚合方式'
+        help='窗口级聚合方式: mean / max / mean_conf(置信度加权)'
     )
     
     parser.add_argument(
         '--model-agg',
         type=str,
-        choices=['logits_avg', 'prob_avg', 'voting'],
-        default='logits_avg',
-        help='模型级聚合方式'
+        choices=[
+            'logits_avg',
+            'prob_avg',
+            'voting',
+            'logits_avg_weighted',
+            'prob_avg_weighted',
+        ],
+        default='prob_avg_weighted',
+        help='模型级聚合方式（含按验证集指标加权）'
     )
     
     parser.add_argument(
