@@ -154,8 +154,19 @@ HAT 模型通过分层机制解决长文本问题：
     \item 数据来自预处理后的 \texttt{train.csv}，随机打乱后按 9:1 划分训练集和验证集。
     \item 使用 \texttt{HATDataset} 将长文档切成最多 $N$ 个片段，每段长度固定为 $K{=}512$，保证长文本尽量被覆盖。
     \item \texttt{MLMDataCollator} 以 15\% 的概率对 token 进行 Mask，并对 input / label 做 pad，对齐 batch 形状。
-    \item 模型采用 HAT-MLM 结构，优化器为 AdamW（lr 5e-5，weight decay 0.01），线性 warmup + 线性衰减，梯度裁剪阈值 1.0，训练步数上限约 10k。
 \end{itemize}
+
+\paragraph{技术手段}
+
+预训练阶段们基于 HAT-MLM 结构，结合 AdamW 优化器、线性 warmup+衰减学习率、EMA 稳定增强以及周期验证与 checkpoint 机制，
+构建了一条稳定可复现的预训练管线，主要配置如下：
+\begin{itemize}
+    \item 模型采用 HAT-MLM 结构，默认 batch size 为 4，最多训练约 10k 个 step，数据读入、打乱后按 9:1 划分训练集和验证集。
+    \item 优化器为 AdamW，学习率 5e-5，weight decay 0.01，\texttt{betas} 设为 (0.9, 0.999)，\texttt{eps} 为 1e-8，并在反向时做梯度裁剪（阈值 1.0）。
+    \item 学习率策略为前 6\% 步数线性 warmup，之后线性衰减到 0。
+    \item 为提高稳定性，默认启用 EMA（衰减系数 0.999）
+\end{itemize}
+
 
 \paragraph{训练效果}
 \begin{table}[h]
@@ -175,32 +186,31 @@ HAT 模型通过分层机制解决长文本问题：
         12000 & \textbf{2.41} & \textbf{11.08} & 最终 / 最佳 \\
         \hline
     \end{tabular}
-    \caption{MLM 训练验证集指标（摘自 \texttt{slurm-65750.out}）}
+    \caption{MLM 训练验证集指标}\label{tab:mlm_metrics}
 \end{table}
 
-验证指标从 Step 200 的 PPL 5064 快速下降到 Step 12000 的 11.08，全程未出现反弹；总耗时约 324 分钟，平均 9.9 samples/s，最终模型已保存为 \texttt{checkpoints/mlm\_hat512/hat\_mlm\_final.pt}，可直接用于后续分类微调。
+从表~\ref{tab:mlm_metrics} 可以看出，验证指标从 Step 200 的 PPL 5064 快速下降到 Step 12000 的 11.08，全程未出现反弹；
+其保存的最佳模型可直接用于后续分类微调。
 
-\subsection{分类训练（一阶段）}
+\subsection{分类训练 Stage1}
 
 \paragraph{整体流程}
-分类阶段采用分层 K 折交叉验证。默认使用 5 折 Stratified K-Fold（种子 42），在保证各折标签分布大致一致的前提下，依次训练并保存每折的最佳模型 \texttt{hat\_cls\_fold\{k\}\_best.pt}，后续用于集成。
+分类阶段采用分层 K 折交叉验证，默认使用 5 折 Stratified K-Fold（种子 42），在保证各折标签分布大致一致的前提下，依次训练并保存每折的最佳模型，用于后续的推理集成。
 
 \paragraph{数据与模型}
-\begin{itemize}
-    \item 训练数据来自 \texttt{data/processed/train.csv}（文本 + 标签），通过 \texttt{HATDataset} 将长文档切成最多 $N$ 段、每段 $K{=}512$，输出形状为 \([N,K]\)。
-    \item \texttt{HATDataCollator} 将样本打包为 \([B,N,K]\) 的 \texttt{input\_ids} / \texttt{attention\_mask} 和 \([B]\) 的标签。
-    \item 分类模型为 \texttt{HATInterleaved512ForClassification}，内部自动添加 CLS，并输出 logits；优先加载 MLM 预训练权重 \texttt{hat\_mlm\_final.pt}，若未提供则随机初始化。
-\end{itemize}
+我们使用经过预处理的新闻文本与标签作为训练数据，将长文档按固定长度切分为若干片段，并在批处理阶段统一打包成 \([B,N,K]\) 的张量输入模型。分类模型基于 HAT 结构，内部自动添加 CLS 标记并输出文档级 logits；初始化时优先加载对应的 MLM 预训练参数。
 
 \paragraph{损失函数与优化策略}
-\begin{itemize}
-    \item 损失函数通过 \texttt{create\_loss\_fn} 选择，包括交叉熵（\texttt{ce}）、标签平滑（\texttt{smooth}，默认，平滑系数 0.05）、Focal Loss 及其组合（\texttt{focal} / \texttt{focal\_smooth}，gamma=2.0）。
-    \item 类别权重从 \texttt{class\_weights.npy} 加载，用于缓解类别不平衡；可选 \texttt{WeightedRandomSampler} 进一步平衡长尾。
-    \item 优化器为 AdamW（lr 3e-5，weight decay 0.01），配合线性 warmup + 线性衰减，默认训练 5 个 epoch；支持 AMP 混合精度和 EMA（decay 0.9999），验证时优先使用 EMA 权重。
-\end{itemize}
+训练阶段综合使用多种分类损失，包括交叉熵、标签平滑以及 Focal Loss 及其组合。默认设置为标签平滑系数 0.05、Focal 的 $\gamma=2.0$，并配合预计算的类别权重以及可选的加权重采样，共同缓解类别不平衡问题。batch size 默认为 64（训练）/128（验证），并在反向阶段采用梯度裁剪（阈值 1.0）。
+
+优化器选用 AdamW（学习率 3e-5，weight decay 0.01，$\text{betas}=(0.9, 0.999)$，$\text{eps}=1\text{e-}8$），学习率先进行约 6\% 的 warmup，之后线性衰减至 0。默认训练 5 个 epoch，并结合 early stopping，在指标长时间不提升时提前结束训练。
+
+为兼顾效率与稳定性，训练可开启 AMP 混合精度以及 EMA（衰减系数 0.9999）滑动平均，验证阶段优先使用 EMA 权重进行评估。日志按 step 记录，每一折使用独立随机种子，便于稳定复现并在后续对各折最佳 checkpoint 进行集成。```
+::contentReference[oaicite:0]{index=0}
+
 
 \paragraph{验证与模型选择}
-每个 epoch 结束后，在当前折的验证集上评估 loss、accuracy 和 macro-F1，并以 macro-F1 作为主指标选取最优权重，保存为 \texttt{hat\_cls\_fold\{k\}\_best.pt}。同时启用 early stopping，若若干个 epoch 指标无提升则提前停止，避免过拟合和无效训练。
+每个 epoch 结束后，在当前折的验证集上评估损失、准确率和 macro-F1，以 macro-F1 作为主要指标选取该折的最佳模型；同时结合 early stopping，当若干轮内指标不再提升时提前停止训练，以降低过拟合风险并避免无效计算。
 
 \begin{table}[h]
     \centering
@@ -215,13 +225,13 @@ HAT 模型通过分层机制解决长文本问题：
         4 & 0.9612 & \texttt{hat\_cls\_fold3\_best.pt} \\
         5 & 0.9625 & \texttt{hat\_cls\_fold4\_best.pt} \\
         \hline
-        \textbf{均值} & \textbf{0.9602 ± 0.0019} & 全部存于 \texttt{checkpoints/cls\_hat512\_kfold} \\
+        \textbf{均值} & \textbf{0.9602 ± 0.0019} & 存于 \texttt{checkpoints/cls\_hat512\_kfold} \\
         \hline
     \end{tabular}
-    \caption{Stage1 K 折验证最佳分数（摘自 \texttt{slurm-kfold-66070.out}）}
+    \caption{Stage1 K 折验证最佳分数}\label{tab:stage1_metrics}
 \end{table}
 
-K 折训练共耗时约 946 分钟，各折最佳模型均由 EMA 权重获得，后续推理直接集成以上 5 个 checkpoint。
+从表~\ref{tab:stage1_metrics} 可以看出，K 折训练共耗时约 946 分钟，各折最佳模型均由 EMA 权重获得，后续推理直接集成以上 5 个 checkpoint。
 
 \subsection{第二阶段微调（Stage2）}
 
@@ -249,10 +259,10 @@ K 折训练共耗时约 946 分钟，各折最佳模型均由 EMA 权重获得�
         3 & 0.9565 & 0.9609 & 否 \\
         \hline
     \end{tabular}
-    \caption{Stage2 K 折部分微调结果（摘自 \texttt{slurm-kfold-stage2-66428.out}）}
+    \caption{Stage2 K 折部分微调结果}\label{tab:stage2_metrics}
 \end{table}
 
-整体上 Stage2 未能超越 Stage1，且作业在 Fold 3 的第 2 个 epoch 途中被取消，后续折未运行；最终推理继续沿用 Stage1 的 5 个折模型。
+从表~\ref{tab:stage2_metrics} 可以看出，整体上 Stage2 未能超越 Stage1，且作业在 Fold 3 的第 2 个 epoch 途中被取消，后续折未运行；最终推理继续沿用 Stage1 的 5 个折模型。
 \begin{itemize}
     \item 一阶段训练已经将模型推到较高性能区间，小步长、少步数的二次微调空间有限；
     \item 额外正则（如 R-Drop、对抗训练）在短训练阶段带来的“扰动”大于收益；
@@ -263,7 +273,7 @@ K 折训练共耗时约 946 分钟，各折最佳模型均由 EMA 权重获得�
 
 \subsection{整体流程}
 
-推理阶段由 \texttt{infer\_kfold.py} 统一调度：自动收集各折模型（若存在 Stage2 则优先使用 \texttt{hat\_cls\_fold\{k\}\_stage2\_best.pt}，否则回退为 Stage1 模型），调用 \texttt{infer.py} 完成长文档滑窗、窗口聚合和多模型集成，最终输出提交文件。
+推理阶段由 \texttt{infer\_kfold.py} 统一调度：自动收集各折模型（若存在 Stage2 则优先使用 Stage2 的 checkpoint，否则回退为 Stage1 模型），调用 \texttt{infer.py} 完成长文档滑窗、窗口聚合和多模型集成，最终输出提交文件。
 
 \subsection{滑窗与特征构建}
 \begin{itemize}
