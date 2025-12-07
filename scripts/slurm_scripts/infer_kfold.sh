@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH -J infer_kfold
+#SBATCH -J test_dynamic_pp
 #SBATCH -p gpu
 #SBATCH -N 1
 #SBATCH --gpus-per-node=1
@@ -62,16 +62,22 @@ KFOLD_DIR="checkpoints/cls_hat512_kfold"
 
 # 数据路径
 TEST_PATH="data/processed/test.csv"
-VAL_PATH=""  # 如需验证集 sanity check，填入路径，否则留空
+VAL_PATH="/data/home/scyb226/lzx/study/lab/tianchi/data/processed/val.csv"  # 验证集路径，用于阈值搜索
 
 # 输出
 OUTPUT_PATH="outputs/submission/submission_kfold.csv"
 
 # 推理超参
-BATCH_SIZE=32
+BATCH_SIZE=32                  # 稳定留显存，兼顾 TTA/MC-Dropout
 WINDOW_AGG="mean_conf"         # mean / max / mean_conf
 MODEL_AGG="prob_avg_weighted"  # logits_avg / prob_avg / voting / *_weighted
 SAVE_LOGITS=true
+WINDOW_TTA_OFFSETS="0,128,256,384" # 更丰富的起点视角，至少包含 0
+MC_DROPOUT_RUNS=4              # 多次采样提升稳健性，留意耗时
+DECISION_THRESHOLD=""          # 如需二分类阈值调优，示例: 0.55
+CLASS_THRESHOLDS=""            # 若多分类阈值已调优，填入逗号分隔列表
+TUNE_CLASS_THRESHOLDS=true     # 14 类场景可在验证集上网格搜索统一阈值
+THRESHOLD_GRID="0.30,0.35,0.40,0.45,0.50,0.55,0.60"  # 搜索网格
 
 # 设备与并行
 DEVICE="cuda"
@@ -89,6 +95,14 @@ echo "Batch Size: ${BATCH_SIZE}"
 echo "窗口聚合: ${WINDOW_AGG}"
 echo "模型聚合: ${MODEL_AGG}"
 echo "保存 logits: ${SAVE_LOGITS}"
+echo "窗口 TTA offsets: ${WINDOW_TTA_OFFSETS}"
+echo "MC Dropout runs: ${MC_DROPOUT_RUNS}"
+if [ -n "${DECISION_THRESHOLD}" ]; then
+  echo "二分类阈值: ${DECISION_THRESHOLD}"
+fi
+if [ -n "${CLASS_THRESHOLDS}" ]; then
+  echo "类别阈值: ${CLASS_THRESHOLDS}"
+fi
 echo ""
 
 # 构建推理命令
@@ -102,6 +116,8 @@ CMD=(
   --model-agg "${MODEL_AGG}"
   --device "${DEVICE}"
   --num-workers ${NUM_WORKERS}
+  --window-tta-offsets "${WINDOW_TTA_OFFSETS}"
+  --mc-dropout-runs ${MC_DROPOUT_RUNS}
 )
 
 if [ -n "${VAL_PATH}" ]; then
@@ -110,6 +126,18 @@ fi
 
 if [ "${SAVE_LOGITS}" = "true" ]; then
   CMD+=(--save-logits)
+fi
+
+if [ -n "${DECISION_THRESHOLD}" ]; then
+  CMD+=(--decision-threshold "${DECISION_THRESHOLD}")
+fi
+
+if [ -n "${CLASS_THRESHOLDS}" ]; then
+  CMD+=(--class-thresholds "${CLASS_THRESHOLDS}")
+fi
+
+if [ "${TUNE_CLASS_THRESHOLDS}" = "true" ] && [ -n "${VAL_PATH}" ]; then
+  CMD+=(--tune-class-thresholds --threshold-grid "${THRESHOLD_GRID}")
 fi
 
 echo "执行推理命令:"

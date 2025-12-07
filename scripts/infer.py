@@ -64,6 +64,34 @@ def log_print(*args, **kwargs):
     print(f"[{timestamp}]", *args, **kwargs)
 
 
+def _parse_int_list(text: str) -> List[int]:
+    """将逗号分隔的整数串解析为列表，过滤空项"""
+    parts = [p.strip() for p in text.split(',')]
+    ints = []
+    for p in parts:
+        if not p:
+            continue
+        try:
+            ints.append(int(p))
+        except ValueError:
+            raise ValueError(f"无法解析整数: {p}")
+    return ints
+
+
+def _parse_float_list(text: str) -> List[float]:
+    """将逗号分隔的浮点数串解析为列表"""
+    parts = [p.strip() for p in text.split(',')]
+    floats: List[float] = []
+    for p in parts:
+        if not p:
+            continue
+        try:
+            floats.append(float(p))
+        except ValueError:
+            raise ValueError(f"无法解析浮点数: {p}")
+    return floats
+
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description='HAT 模型推理脚本（支持滑动窗口 + 多模型 ensemble）',
@@ -100,6 +128,45 @@ def parse_args():
         type=str,
         default=str(PROJECT_ROOT / 'data' / 'test_a_sample_submit.csv'),
         help='天池提交样例文件路径'
+    )
+    
+    parser.add_argument(
+        '--window-tta-offsets',
+        type=str,
+        default='0',
+        help='窗口 TTA 的 token offset 列表，逗号分隔。默认只使用 offset=0'
+    )
+    
+    parser.add_argument(
+        '--mc-dropout-runs',
+        type=int,
+        default=1,
+        help='MC Dropout 前向次数 (>1 时推理阶段仅对 Dropout 启用训练模式)'
+    )
+    
+    parser.add_argument(
+        '--decision-threshold',
+        type=float,
+        default=None,
+        help='二分类时的正类概率阈值，例如 0.6 表示 p(正类)>=0.6 才预测正类'
+    )
+    
+    parser.add_argument(
+        '--class-thresholds',
+        type=str,
+        default=None,
+        help='按类别的概率阈值，逗号分隔，长度需等于 num_labels；若提供则优先于 decision-threshold'
+    )
+    parser.add_argument(
+        '--tune-class-thresholds',
+        action='store_true',
+        help='在验证集上网格搜索统一阈值（14 类场景建议配合 --val-path 使用）'
+    )
+    parser.add_argument(
+        '--threshold-grid',
+        type=str,
+        default='0.30,0.35,0.40,0.45,0.50,0.55,0.60',
+        help='阈值网格，逗号分隔，用于 tune-class-thresholds'
     )
     
     # 推理参数
@@ -174,6 +241,7 @@ class InferenceDataset(Dataset):
     1. 无标签
     2. 保留 doc_id 用于聚合
     3. 支持滑动窗口（在 collator 中展开）
+    4. 支持窗口 TTA（多种 token offset 视角）
     """
     
     def __init__(
@@ -182,6 +250,7 @@ class InferenceDataset(Dataset):
         doc_ids: List[int],
         tokenizer,
         segmenter,
+        window_tta_offsets: Optional[List[int]] = None,
     ):
         """
         Args:
@@ -189,11 +258,13 @@ class InferenceDataset(Dataset):
             doc_ids: 文档 ID 列表
             tokenizer: HATTokenizer 实例
             segmenter: DocumentSegmenter 实例
+            window_tta_offsets: TTA 的 token offset 列表（含 0），按 offset 切子串做滑窗
         """
         self.texts = texts
         self.doc_ids = doc_ids
         self.tokenizer = tokenizer
         self.segmenter = segmenter
+        self.window_tta_offsets = window_tta_offsets or [0]
     
     def __len__(self) -> int:
         return len(self.texts)
@@ -205,7 +276,7 @@ class InferenceDataset(Dataset):
         Returns:
             dict: {
                 "doc_id": int,
-                "windows": List[SegmentedDocument],  # 滑动窗口列表
+                "windows": List[SegmentedDocument],  # 滑动窗口列表（含 TTA 视角）
             }
         """
         text = self.texts[idx]
@@ -214,8 +285,20 @@ class InferenceDataset(Dataset):
         # Tokenize
         token_ids = self.tokenizer.encode(text)
         
-        # 获取滑动窗口
-        windows = self.segmenter.get_sliding_windows(token_ids)
+        windows: List = []
+        for offset in self.window_tta_offsets:
+            if offset <= 0:
+                token_view = token_ids
+            elif offset >= len(token_ids):
+                continue  # 该 offset 已超出长度，跳过
+            else:
+                token_view = token_ids[offset:]
+            
+            windows.extend(self.segmenter.get_sliding_windows(token_view))
+        
+        # 防御：确保至少有一个窗口
+        if not windows:
+            windows = self.segmenter.get_sliding_windows(token_ids)
         
         return {
             "doc_id": doc_id,
@@ -299,6 +382,53 @@ class InferenceCollator:
 
 
 # =============================================================================
+# 推理辅助：MC Dropout & 阈值策略
+# =============================================================================
+
+def _enable_dropout_only(model: torch.nn.Module, train: bool = True) -> None:
+    """仅对 Dropout 模块打开训练模式，避免 BatchNorm 等进入 train。"""
+    dropout_layers = (
+        torch.nn.Dropout,
+        torch.nn.Dropout1d,
+        torch.nn.Dropout2d,
+        torch.nn.Dropout3d,
+        torch.nn.AlphaDropout,
+    )
+    for module in model.modules():
+        if isinstance(module, dropout_layers):
+            module.train(mode=train)
+
+
+def _apply_decision_thresholds(
+    agg_logits: torch.Tensor,
+    agg_probs: torch.Tensor,
+    num_labels: int,
+    decision_threshold: Optional[float] = None,
+    class_thresholds: Optional[torch.Tensor] = None,
+    fallback_vote: Optional[np.ndarray] = None,
+) -> int:
+    """
+    根据阈值/投票/argmax 生成最终类别
+    优先级：class_thresholds > binary decision_threshold > voting > argmax
+    """
+    if class_thresholds is not None:
+        if class_thresholds.numel() != num_labels:
+            raise ValueError("class_thresholds 长度必须等于 num_labels")
+        mask = agg_probs >= class_thresholds
+        if mask.any():
+            masked_probs = agg_probs * mask.float()
+            return int(masked_probs.argmax(dim=-1).item())
+    
+    if num_labels == 2 and decision_threshold is not None:
+        return int(agg_probs[1] >= decision_threshold)
+    
+    if fallback_vote is not None:
+        return int(fallback_vote.argmax())
+    
+    return int(agg_logits.argmax(dim=-1).item())
+
+
+# =============================================================================
 # 模型加载
 # =============================================================================
 
@@ -374,6 +504,7 @@ def infer_single_model(
     device: torch.device,
     num_labels: int,
     window_agg: str = 'mean',
+    mc_dropout_runs: int = 1,
 ) -> Dict[int, torch.Tensor]:
     """
     对单个模型进行推理，并在窗口维度聚合
@@ -384,11 +515,16 @@ def infer_single_model(
         device: 设备
         num_labels: 类别数
         window_agg: 窗口聚合方式 ('mean' or 'max')
+        mc_dropout_runs: MC Dropout 前向次数（>1 时启用 Dropout）
         
     Returns:
         doc_logits: {doc_id: Tensor[num_labels]} - 每个文档的聚合 logits
     """
+    # 先整体设为 eval，再仅对 Dropout 打开训练模式，避免 BatchNorm 等进入 train
     model.eval()
+    enable_mc_dropout = mc_dropout_runs and mc_dropout_runs > 1
+    if enable_mc_dropout:
+        _enable_dropout_only(model, train=True)
     
     # 按 doc_id 收集窗口 logits
     doc_window_logits = defaultdict(list)  # doc_id -> [Tensor[num_labels], ...]
@@ -398,12 +534,22 @@ def infer_single_model(
         attention_mask = batch["attention_mask"].to(device)  # [B, N, K]
         doc_ids = batch["doc_ids"]                       # [B]
         
-        # 前向传播
-        outputs = model(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-        )
-        logits = outputs["logits"]  # [B, num_labels]
+        # 前向传播（支持 MC Dropout）
+        if enable_mc_dropout:
+            logits_runs = []
+            for _ in range(mc_dropout_runs):
+                outputs = model(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                )
+                logits_runs.append(outputs["logits"])
+            logits = torch.stack(logits_runs, dim=0).mean(dim=0)  # [B, num_labels]
+        else:
+            outputs = model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+            )
+            logits = outputs["logits"]  # [B, num_labels]
         
         # 收集每个窗口的 logits
         for i in range(logits.size(0)):
@@ -446,6 +592,9 @@ def run_inference(
     window_agg: str = 'mean',
     model_agg: str = 'logits_avg',
     model_weights: Optional[np.ndarray] = None,
+    mc_dropout_runs: int = 1,
+    decision_threshold: Optional[float] = None,
+    class_thresholds: Optional[np.ndarray] = None,
 ) -> Tuple[Dict[int, int], Dict[int, np.ndarray]]:
     """
     多模型 ensemble 推理
@@ -482,7 +631,12 @@ def run_inference(
         
         # 获取该模型对每个 doc 的 logits（已窗口聚合）
         doc_logits = infer_single_model(
-            model, test_loader, device, num_labels, window_agg
+            model=model,
+            test_loader=test_loader,
+            device=device,
+            num_labels=num_labels,
+            window_agg=window_agg,
+            mc_dropout_runs=mc_dropout_runs,
         )
         
         # 添加到聚合容器
@@ -495,6 +649,11 @@ def run_inference(
     
     log_print("\n  模型级聚合...")
     
+    # 预处理阈值
+    class_thresholds_tensor = None
+    if class_thresholds is not None:
+        class_thresholds_tensor = torch.as_tensor(class_thresholds, dtype=torch.float32)
+    
     for doc_id, logit_list in logits_dict.items():
         stacked = torch.stack(logit_list, dim=0)  # [M, num_labels]
         
@@ -504,24 +663,24 @@ def run_inference(
             w = weight_tensor[: stacked.size(0)]
             w = w / (w.sum() + 1e-12)  # 归一化
         
+        vote_counts = None
         if model_agg == 'logits_avg':
             # Logits 平均
             agg_logits = stacked.mean(dim=0)  # [num_labels]
-            label = agg_logits.argmax(dim=-1).item()
+            agg_probs = torch.softmax(agg_logits, dim=-1)
             
         elif model_agg == 'logits_avg_weighted':
             if w is None:
                 agg_logits = stacked.mean(dim=0)
             else:
                 agg_logits = (stacked * w.view(-1, 1)).sum(dim=0)
-            label = agg_logits.argmax(dim=-1).item()
+            agg_probs = torch.softmax(agg_logits, dim=-1)
             
         elif model_agg == 'prob_avg':
             # 概率平均（softmax 后平均）
             probs = torch.softmax(stacked, dim=-1)  # [M, num_labels]
             agg_probs = probs.mean(dim=0)  # [num_labels]
             agg_logits = torch.log(agg_probs + 1e-10)
-            label = agg_probs.argmax(dim=-1).item()
             
         elif model_agg == 'prob_avg_weighted':
             probs = torch.softmax(stacked, dim=-1)  # [M, num_labels]
@@ -530,19 +689,27 @@ def run_inference(
             else:
                 agg_probs = (probs * w.view(-1, 1)).sum(dim=0)
             agg_logits = torch.log(agg_probs + 1e-10)
-            label = agg_probs.argmax(dim=-1).item()
             
         elif model_agg == 'voting':
             # 投票
             votes = stacked.argmax(dim=-1).numpy()  # [M]
             vote_counts = np.bincount(votes, minlength=num_labels)
-            label = vote_counts.argmax()
             agg_logits = stacked.mean(dim=0)  # 保存平均 logits 用于分析
+            agg_probs = torch.softmax(agg_logits, dim=-1)
             
         else:
             raise ValueError(f"Unknown model aggregation: {model_agg}")
         
-        preds[doc_id] = label
+        label = _apply_decision_thresholds(
+            agg_logits=agg_logits,
+            agg_probs=agg_probs,
+            num_labels=num_labels,
+            decision_threshold=decision_threshold,
+            class_thresholds=class_thresholds_tensor,
+            fallback_vote=vote_counts if model_agg == 'voting' else None,
+        )
+        
+        preds[doc_id] = int(label)
         ensemble_logits[doc_id] = agg_logits.numpy()
     
     return preds, ensemble_logits
@@ -615,6 +782,12 @@ def evaluate_on_val(
     window_agg: str,
     model_agg: str,
     model_weights: Optional[np.ndarray] = None,
+    mc_dropout_runs: int = 1,
+    window_tta_offsets: Optional[List[int]] = None,
+    decision_threshold: Optional[float] = None,
+    class_thresholds: Optional[np.ndarray] = None,
+    tune_class_thresholds: bool = False,
+    threshold_grid: Optional[List[float]] = None,
 ) -> None:
     """
     在验证集上评估（sanity check）
@@ -639,6 +812,7 @@ def evaluate_on_val(
         doc_ids=doc_ids,
         tokenizer=tokenizer,
         segmenter=segmenter,
+        window_tta_offsets=window_tta_offsets,
     )
     
     collator = InferenceCollator()
@@ -653,7 +827,7 @@ def evaluate_on_val(
     )
     
     # 推理
-    preds, _ = run_inference(
+    preds, ensemble_logits = run_inference(
         models=models,
         test_loader=val_loader,
         device=device,
@@ -661,6 +835,9 @@ def evaluate_on_val(
         window_agg=window_agg,
         model_agg=model_agg,
         model_weights=model_weights,
+        mc_dropout_runs=mc_dropout_runs,
+        decision_threshold=decision_threshold,
+        class_thresholds=class_thresholds,
     )
     
     # 评估
@@ -671,6 +848,43 @@ def evaluate_on_val(
     
     log_print(f"\n  Val Macro-F1: {macro_f1:.4f}")
     log_print(f"  Val Accuracy: {accuracy:.4f}")
+    
+    # 可选：在验证集上网格搜索统一类阈值（多类时作为 soft filter）
+    if tune_class_thresholds and threshold_grid:
+        log_print("\n  启动阈值网格搜索 (统一阈值，按类过滤后再 argmax)...")
+        # 将 logits 转 prob
+        doc_ids_sorted = sorted(doc_ids)
+        logits_tensor = torch.tensor([ensemble_logits[i] for i in doc_ids_sorted], dtype=torch.float32)
+        probs_tensor = torch.softmax(logits_tensor, dim=-1)
+        labels_true_tensor = torch.tensor(labels_true, dtype=torch.int64)
+        
+        best_f1 = -1.0
+        best_t = None
+        
+        for t in threshold_grid:
+            th = torch.full((num_labels,), float(t), dtype=torch.float32)
+            preds_t = []
+            for p, logit in zip(probs_tensor, logits_tensor):
+                label = _apply_decision_thresholds(
+                    agg_logits=logit,
+                    agg_probs=p,
+                    num_labels=num_labels,
+                    decision_threshold=None,            # 14 类，不用二分类阈值
+                    class_thresholds=th,
+                    fallback_vote=None,
+                )
+                preds_t.append(label)
+            macro_f1_t = f1_score(labels_true_tensor, preds_t, average='macro')
+            if macro_f1_t > best_f1:
+                best_f1 = macro_f1_t
+                best_t = t
+        
+        if best_t is not None:
+            log_print(f"  网格搜索最佳统一阈值: {best_t:.2f}, Val Macro-F1: {best_f1:.4f}")
+            suggested = ",".join([f"{best_t:.2f}" for _ in range(num_labels)])
+            log_print(f"  建议推理时添加参数: --class-thresholds {suggested}")
+        else:
+            log_print("  阈值网格搜索未找到更优解，保持默认 argmax。")
 
 
 # =============================================================================
@@ -690,10 +904,33 @@ def main():
     # ========== 1. 加载模型 ==========
     models, model_weights = load_models(args.model_paths, device)
     
+    # 解析窗口 TTA offsets
+    window_tta_offsets = _parse_int_list(args.window_tta_offsets)
+    if 0 not in window_tta_offsets:
+        window_tta_offsets = [0] + window_tta_offsets
+    window_tta_offsets = sorted(list({o for o in window_tta_offsets if o >= 0}))
+    
+    # 解析类别阈值
+    class_thresholds = _parse_float_list(args.class_thresholds) if args.class_thresholds else None
+    threshold_grid = _parse_float_list(args.threshold_grid) if args.threshold_grid else []
+    
     # 获取 num_labels
     from src.common_config import COMMON_CONFIG
     num_labels = COMMON_CONFIG.num_labels
     log_print(f"\n类别数: {num_labels}")
+    
+    if class_thresholds and len(class_thresholds) != num_labels:
+        raise ValueError(
+            f"class-thresholds 长度({len(class_thresholds)})需等于 num_labels({num_labels})"
+        )
+    
+    log_print(f"窗口 TTA offsets: {window_tta_offsets}")
+    if args.mc_dropout_runs > 1:
+        log_print(f"MC Dropout 前向次数: {args.mc_dropout_runs}")
+    if args.decision_threshold is not None:
+        log_print(f"二分类阈值: {args.decision_threshold}")
+    if class_thresholds:
+        log_print(f"类别阈值: {class_thresholds}")
     
     # ========== 2. 可选：验证集 sanity check ==========
     if args.val_path and Path(args.val_path).exists():
@@ -707,6 +944,12 @@ def main():
             window_agg=args.window_agg,
             model_agg=args.model_agg,
             model_weights=model_weights,
+            mc_dropout_runs=args.mc_dropout_runs,
+            window_tta_offsets=window_tta_offsets,
+            decision_threshold=args.decision_threshold,
+            class_thresholds=class_thresholds,
+            tune_class_thresholds=args.tune_class_thresholds,
+            threshold_grid=threshold_grid,
         )
     
     # ========== 3. 构建测试集 DataLoader ==========
@@ -729,6 +972,7 @@ def main():
         doc_ids=doc_ids,
         tokenizer=tokenizer,
         segmenter=segmenter,
+        window_tta_offsets=window_tta_offsets,
     )
     
     collator = InferenceCollator()
@@ -753,6 +997,9 @@ def main():
         window_agg=args.window_agg,
         model_agg=args.model_agg,
         model_weights=model_weights,
+        mc_dropout_runs=args.mc_dropout_runs,
+        decision_threshold=args.decision_threshold,
+        class_thresholds=class_thresholds,
     )
     
     elapsed = time.time() - start_time

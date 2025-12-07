@@ -77,6 +77,20 @@ def parse_args():
     )
     
     parser.add_argument(
+        '--device',
+        type=str,
+        default='cuda',
+        help='设备（cuda / cpu）'
+    )
+    
+    parser.add_argument(
+        '--num-workers',
+        type=int,
+        default=4,
+        help='DataLoader worker 数'
+    )
+    
+    parser.add_argument(
         '--window-agg',
         type=str,
         choices=['mean', 'max', 'mean_conf'],
@@ -96,6 +110,47 @@ def parse_args():
         ],
         default='prob_avg_weighted',
         help='模型级聚合方式（含按验证集指标加权）'
+    )
+    
+    parser.add_argument(
+        '--window-tta-offsets',
+        type=str,
+        default='0',
+        help='窗口 TTA 的 token offset 列表，逗号分隔，0 表示从头开始'
+    )
+    
+    parser.add_argument(
+        '--mc-dropout-runs',
+        type=int,
+        default=1,
+        help='MC Dropout 前向次数，>1 时推理阶段保持 Dropout 开启'
+    )
+    
+    parser.add_argument(
+        '--decision-threshold',
+        type=float,
+        default=None,
+        help='二分类正类概率阈值，例如 0.6 表示 p>=0.6 才预测正类'
+    )
+    
+    parser.add_argument(
+        '--class-thresholds',
+        type=str,
+        default=None,
+        help='按类别概率阈值，逗号分隔，长度需等于类别数；优先于 decision-threshold'
+    )
+    
+    parser.add_argument(
+        '--tune-class-thresholds',
+        action='store_true',
+        help='在验证集上网格搜索统一阈值（14 类使用时需提供 val-path）'
+    )
+    
+    parser.add_argument(
+        '--threshold-grid',
+        type=str,
+        default='0.30,0.35,0.40,0.45,0.50,0.55,0.60',
+        help='阈值网格，逗号分隔，用于 tune-class-thresholds'
     )
     
     parser.add_argument(
@@ -155,6 +210,15 @@ def main():
     
     log_print(f"\n使用 {len(model_paths)} 个模型进行 Ensemble 推理")
     log_print(f"窗口聚合: {args.window_agg}, 模型聚合: {args.model_agg}")
+    log_print(f"窗口 TTA offsets: {args.window_tta_offsets}")
+    if args.mc_dropout_runs > 1:
+        log_print(f"MC Dropout 前向次数: {args.mc_dropout_runs}")
+    if args.decision_threshold is not None:
+        log_print(f"二分类阈值: {args.decision_threshold}")
+    if args.class_thresholds:
+        log_print(f"类别阈值: {args.class_thresholds}")
+    if args.tune_class_thresholds:
+        log_print(f"验证集网格搜索阈值: {args.threshold_grid}")
     log_print()
     
     # 构建 infer.py 命令
@@ -167,8 +231,12 @@ def main():
         "--model-paths", model_paths_str,
         "--output-path", args.output_path,
         "--batch-size", str(args.batch_size),
+        "--device", args.device,
+        "--num-workers", str(args.num_workers),
         "--window-agg", args.window_agg,
         "--model-agg", args.model_agg,
+        "--window-tta-offsets", args.window_tta_offsets,
+        "--mc-dropout-runs", str(args.mc_dropout_runs),
     ]
     
     if args.val_path:
@@ -176,6 +244,16 @@ def main():
     
     if args.save_logits:
         cmd.append("--save-logits")
+    
+    if args.decision_threshold is not None:
+        cmd.extend(["--decision-threshold", str(args.decision_threshold)])
+    
+    if args.class_thresholds:
+        cmd.extend(["--class-thresholds", args.class_thresholds])
+    
+    if args.tune_class_thresholds:
+        cmd.append("--tune-class-thresholds")
+        cmd.extend(["--threshold-grid", args.threshold_grid])
     
     # 执行推理
     log_print("执行推理命令:")

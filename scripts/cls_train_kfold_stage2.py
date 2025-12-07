@@ -410,8 +410,11 @@ def train_single_fold(
                 if args.grad_clip > 0:
                     scaler.unscale_(optimizer)
                     torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
-                optimizer_was_run = scaler.step(optimizer)
+                scale_before = scaler.get_scale()
+                scaler.step(optimizer)
                 scaler.update()
+                # 若出现 inf，GradScaler 会缩放 scale，表示本步已跳过优化器
+                optimizer_was_run = scaler.get_scale() >= scale_before
             else:
                 loss, ce_loss, kl_loss = compute_loss(
                     model, batch, loss_fn,
@@ -439,7 +442,7 @@ def train_single_fold(
                 optimizer.step()
                 optimizer_was_run = True
 
-            if optimizer_was_run is not None:
+            if optimizer_was_run:
                 scheduler.step()
             if ema is not None:
                 ema.update(model)

@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH -J stage2
+#SBATCH -J test_dynamic_pp
 #SBATCH -p gpu
 #SBATCH -N 1
 #SBATCH --gpus-per-node=1
@@ -67,13 +67,13 @@ CLASS_WEIGHTS="data/processed/class_weights.npy"
 STAGE1_DIR="checkpoints/cls_hat512_kfold"
 OUTPUT_DIR="checkpoints/cls_hat512_kfold_stage2"
 
-# 训练超参（小学习率 + 少 epoch）
+# 训练超参（更激进设置）
 BATCH_SIZE=32
 EVAL_BATCH_SIZE=64
-LR=1e-5
+LR=2e-5
 WEIGHT_DECAY=0.01
-NUM_EPOCHS=3
-WARMUP_RATIO=0.05
+NUM_EPOCHS=5
+WARMUP_RATIO=0.1
 LOG_EVERY=50
 GRAD_CLIP=1.0
 
@@ -85,7 +85,7 @@ FOCAL_GAMMA=2.0
 # 正则与增强
 USE_RDROP=true
 RDROP_ALPHA=0.5
-USE_FGM=false               # 如需开启设为 true
+USE_FGM=true                # 开启对抗
 FGM_EPS=0.5
 FGM_LOSS_RATIO=1.0
 RANDOM_OFFSET=true          # 随机滑窗起点
