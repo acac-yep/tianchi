@@ -1,0 +1,147 @@
+\documentclass[a4paper,12pt]{ctexart}
+\usepackage[utf8]{inputenc}
+\usepackage{geometry}
+\usepackage{amsmath}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{float}
+\usepackage{listings}
+\usepackage{xcolor}
+
+\geometry{left=2.5cm,right=2.5cm,top=2.5cm,bottom=2.5cm}
+
+% 代码高亮设置
+\lstset{
+    basicstyle=\small\ttfamily,
+    columns=flexible,
+    breaklines=true,
+    backgroundcolor=\color{gray!10},
+    frame=single,
+    keywordstyle=\color{blue},
+    commentstyle=\color{green!50!black},
+    stringstyle=\color{red}
+}
+
+\title{\textbf{【AI入门系列】智慧笔迹：NLP新闻分类学习赛\\实验报告}}
+\author{\textbf{队伍名：Attention请注意我} \\ 排名：rk3}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\section{团队成员与分工}
+
+\begin{itemize}
+    \item \textbf{郑亦航}：负责数据预处理流水线搭建、数据集特征分析（长度分布、类别不平衡分析）、数据清洗策略制定以及 HAT 模型架构的代码构建（Model Skeleton）。
+    \item \textbf{李梓煊}：负责 MLM（Masked Language Modeling）预训练脚本的编写、模型训练流程的调试、Loss 函数调优以及算力资源管理。
+\end{itemize}
+
+\section{问题定义}
+
+本次比赛的任务是“新闻文本分类”。
+\begin{itemize}
+    \item \textbf{输入}：匿名处理后的字符 ID 序列（空格分隔），代表一篇新闻文本。数据经过脱敏处理，无法直接看到原始汉字。
+    \item \textbf{输出}：将文本分类到 14 个类别之一（如财经、体育、娱乐等），对应的 Label ID 为 0-13。
+    \item \textbf{挑战}：
+    \begin{enumerate}
+        \item \textbf{长文本特性}：统计发现大量样本长度超过 BERT 模型的 512 限制，部分样本长达 40,000+ token。
+        \item \textbf{类别不平衡}：部分类别样本数极少，最大的类别与最小的类别比例高达 42:1。
+        \item \textbf{数据噪声}：存在空文本、重复文本及标签冲突的情况。
+    \end{enumerate}
+\end{itemize}
+
+\section{数据分析与预处理}
+
+\subsection{特征分析与清洗}
+通过编写分析脚本，我们发现原始数据存在以下问题并进行了处理：
+\begin{enumerate}
+    \item \textbf{去重与冲突处理}：移除了完全重复的文本（89条）和标签冲突的样本（16条）。
+    \item \textbf{长度分布}：平均长度约 900 tokens，远超 512。因此直接截断会导致严重信息丢失，必须采用长文本建模方案。
+    \item \textbf{类别分布}：Label 0-3 占据主要部分，Label 13 仅有 0.45\%。我们计算了 \texttt{inverse\_sqrt} 类别权重用于 Loss 计算。
+\end{enumerate}
+
+\subsection{从原始数据到模型输入的转化过程}
+
+\begin{enumerate}
+    \item \textbf{Token ID 重映射 (Remap)}：
+    原始数据的 ID 范围是 0-7549。为了给特殊 Token 预留位置，我们将所有原始 ID 偏移 +5。
+    \[ ID_{new} = ID_{raw} + 5 \]
+    预留位置：0=[PAD], 1=[UNK], 2=[CLS\_SEG], 3=[SEP], 4=[MASK]。
+
+    \item \textbf{分段 (Segmentation)}：
+    由于选择了层次化模型，我们需要将长文档切分为 $N$ 个片段。设定每个片段长度 $K=512$，最大片段数 $N=8$。
+    \begin{itemize}
+        \item 若文档长度 $L > 4096$，则截断。
+        \item 若文档长度 $L < 4096$，则填充 [PAD]。
+        \item \textbf{Tail Segment Pullback}：为了防止最后一个片段过短（如仅有几个 token），如果末尾片段有效长度不足阈值，我们从文档末尾向前回溯采样，保证最后一个片段也是语义丰富的。
+    \end{itemize}
+
+    \item \textbf{模型输入形状}：
+    经过 `HATDataset` 处理后，一个样本被转换为张量形状：
+    \[ \text{Input IDs}: [N, K] \rightarrow [8, 512] \]
+    模型内部会自动添加 `[CLS]` token，最终计算形状为 $[8, 513]$。
+\end{enumerate}
+
+\section{模型设计}
+
+鉴于文本极长的特性，传统的 BERT 模型（最大长度 512）无法处理，而 Longformer 等模型显存占用过大。经过广泛的调研后，我们选择了 \textbf{HAT (Hierarchical Attention Transformer)} 架构，具体配置为 \texttt{HAT-Interleaved-512}。
+
+\subsection{模型选择依据}
+HAT 模型通过分层机制解决长文本问题：
+\begin{itemize}
+    \item \textbf{计算效率}：将注意力计算复杂度从 $O(L^2)$ 降低到 $O(N \cdot K^2 + N^2)$。
+    \item \textbf{全局信息交互}：通过 Segment-wise 和 Cross-segment 的交替结构，既捕捉局部细节，又捕捉全文脉络。
+\end{itemize}
+
+\subsection{模型原理}
+我们的模型由 6 层 `HATLayer` 堆叠而成。每一层包含三个步骤：
+
+\begin{enumerate}
+    \item \textbf{Segment-wise Encoder (SWE)}：
+    对每个 512 长度的片段独立进行 Self-Attention。
+    \[ \text{SWE}(S_i) = \text{TransformerBlock}(S_i) \]
+    这一步捕捉片段内的局部语义。
+
+    \item \textbf{Cross-segment Encoder (CSE)}：
+    收集所有片段的 `[CLS]` token，进行一次全局 Self-Attention。
+    \[ H_{cls} = \text{Concat}([CLS]_1, [CLS]_2, ..., [CLS]_N) \]
+    \[ H'_{cls} = \text{TransformerBlock}(H_{cls}) \]
+    这一步让不同片段的信息进行交互。
+
+    \item \textbf{Information Injection}：
+    将交互后的全局信息 $H'_{cls}$ 重新广播（Broadcast）并加回到各片段的 token 表示中，实现全局上下文对局部的指导。
+\end{enumerate}
+
+\subsection{输出形式}
+模型的最终输出取首个片段的 `[CLS]` 向量（或所有片段 `[CLS]` 的池化），通过一个线性层映射到 14 维空间：
+\[ \text{Logits} = \text{Linear}(H_{final\_cls}) \in \mathbb{R}^{14} \]
+
+\section{训练过程}
+
+\subsection{预训练策略 (MLM)}
+为了让模型适应特定的新闻数据分布，我们在有标签数据上进行了 Masked Language Modeling (MLM) 预训练。
+\begin{itemize}
+    \item \textbf{Mask 策略}：随机 Mask 15\% 的 token。
+    \item \textbf{Loss}：计算被 Mask 位置的预测交叉熵。
+    \item \textbf{效果}：通过 `mlm_train.py` 脚本，Loss 从初始的 9.12 下降至 6.89，证明模型学到了领域特征。
+\end{itemize}
+
+\subsection{Loss 函数设计}
+在分类微调阶段，我们使用 \textbf{加权交叉熵损失函数 (Weighted Cross Entropy Loss)}。
+
+\[ L = - \sum_{c=1}^{M} w_c \cdot y_{o,c} \log(p_{o,c}) \]
+
+其中：
+\begin{itemize}
+    \item $M=14$ 为类别数。
+    \item $y$ 为真实标签（One-hot），$p$ 为模型预测概率。
+    \item \textbf{最小化含义}：交叉熵衡量的是两个概率分布的差异。最小化该 Loss 等价于最大化模型预测正确类别的似然概率，使预测分布无限接近真实分布。
+    \item \textbf{权重 $w_c$}：针对类别不平衡，我们使用 `inverse_sqrt` 方法计算权重：$w_c = 1 / \sqrt{N_c}$。这使得少数类样本在梯度更新中拥有更大的话语权，防止模型偏向预测多数类。
+\end{itemize}
+
+\section{实验总结与感悟}
+
+
+\end{document}
