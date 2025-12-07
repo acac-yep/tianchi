@@ -2,6 +2,7 @@
 \usepackage[utf8]{inputenc}
 \usepackage{geometry}
 \usepackage{amsmath}
+\usepackage{amssymb}
 \usepackage{graphicx}
 \usepackage{booktabs}
 \usepackage{hyperref}
@@ -23,7 +24,7 @@
     stringstyle=\color{red}
 }
 
-\title{\textbf{【AI入门系列】智慧笔迹：NLP新闻分类学习赛\\实验报告}}
+\title{\textbf{NLP新闻分类学习赛\\实验报告}}
 \author{\textbf{队伍名：Attention请注意我} \\ 排名：rk3}
 \date{\today}
 
@@ -33,10 +34,27 @@
 
 \section{团队成员与分工}
 
+本项目采用“共同决策 + 分工落地”的协作机制：在方案设计阶段由两人共同调研、讨论并决策整体技术路线，
+在实现阶段按职责拆分任务、各自负责落地。
+为在兼顾效率与质量的前提下实现分工清晰、任务解耦，我们将工作划分为前后端两个角色，具体如下：
+
 \begin{itemize}
-    \item \textbf{郑亦航}：负责数据预处理流水线搭建、数据集特征分析（长度分布、类别不平衡分析）、数据清洗策略制定以及 HAT 模型架构的代码构建（Model Skeleton）。
-    \item \textbf{李梓煊}：负责 MLM（Masked Language Modeling）预训练脚本的编写、模型训练流程的调试、Loss 函数调优以及算力资源管理。
+    \item \textbf{郑亦航}（前端：数据与模型设计）
+    \begin{itemize}
+        \item 负责数据探索性分析（如文本长度分布、类别不平衡等），撰写分析报告，为后续建模与训练策略提供依据。
+        \item 搭建端到端的数据预处理流水线，完成数据清洗、切分、标签重映射等脚本封装，确保全流程可复现。
+        \item 设计并实现 HAT 模型基础架构，定义输入管线与关键模块接口，并完成模型骨架的单元测试。
+    \end{itemize}
+
+    \item \textbf{李梓煊}（后端：训练与部署优化）
+    \begin{itemize}
+        \item 实现 MLM 预训练流程，完成与数据管线、Tokenizer / ID 偏移的对接与适配，保证长文本场景下的稳定训练。
+        \item 优化分类训练流程，覆盖梯度累积、混合精度训练、学习率调度等环节，在长文本场景下提升收敛速度与性能。
+        \item 负责第二阶段微调，设计与调整损失函数（如不同 Loss 组合）。
+        \item 实现推理部署：基于 K-fold，将各折最佳 HAT 模型用于长文档滑窗前向与窗口聚合，在此基础上进行多模型加权集成，输出最终预测结果。
+    \end{itemize}
 \end{itemize}
+
 
 \section{问题定义}
 
@@ -46,10 +64,17 @@
     \item \textbf{输出}：将文本分类到 14 个类别之一（如财经、体育、娱乐等），对应的 Label ID 为 0-13。
     \item \textbf{挑战}：
     \begin{enumerate}
-        \item \textbf{长文本特性}：统计发现大量样本长度超过 BERT 模型的 512 限制，部分样本长达 40,000+ token。
-        \item \textbf{类别不平衡}：部分类别样本数极少，最大的类别与最小的类别比例高达 42:1。
-        \item \textbf{数据噪声}：存在空文本、重复文本及标签冲突的情况。
+        \item \textbf{长文本结构复杂性}：许多样本长度远超 BERT 模型的 512 token 限制（部分达到 40,000+ token），且关键信息在文本中分布稀疏、跨段依赖长，分段式编码容易遗漏关键语义。
+        
+        \item \textbf{文本风格与领域差异}：数据来源多样，风格从新闻报道到口语评论均有，语气、表达与话题差异显著，使模型难以学习统一、稳健的特征表示。
+        
+        \item \textbf{类别极度不平衡}：训练集中类别数量分布长尾显著，最大与最小类别比例高达 42:1，模型在标准训练中容易偏向头部类别。
+        
+        \item \textbf{数据噪声显著}：存在空文本、重复文本、标签冲突、低质量内容等多种噪声，会影响训练稳定性并降低模型泛化能力。
+        
+        \item \textbf{计算资源与模型容量限制}：长文本 + 大规模模型导致显存压力大，限制可使用的 batch size、对抗训练策略及模型规模，使训练不够充分。
     \end{enumerate}
+    
 \end{itemize}
 
 \section{数据分析与预处理}
@@ -118,30 +143,125 @@ HAT 模型通过分层机制解决长文本问题：
 模型的最终输出取首个片段的 `[CLS]` 向量（或所有片段 `[CLS]` 的池化），通过一个线性层映射到 14 维空间：
 \[ \text{Logits} = \text{Linear}(H_{final\_cls}) \in \mathbb{R}^{14} \]
 
-\section{训练过程}
+\section{训练调优}
 
-\subsection{预训练策略 (MLM)}
-为了让模型适应特定的新闻数据分布，我们在有标签数据上进行了 Masked Language Modeling (MLM) 预训练。
+\subsection{预训练}
+预训练阶段采用 Masked Language Modeling（MLM）让模型先学习新闻语料的语义，再进入下游分类。内容分为基本策略、关键技术与训练效果三部分：
+\paragraph{基本策略}
 \begin{itemize}
-    \item \textbf{Mask 策略}：随机 Mask 15\% 的 token。
-    \item \textbf{Loss}：计算被 Mask 位置的预测交叉熵。
-    \item \textbf{效果}：通过 `mlm_train.py` 脚本，Loss 从初始的 9.12 下降至 6.89，证明模型学到了领域特征。
+    \item 从预处理后的 \texttt{train.csv} 读取文本，随机打乱后按 9:1 划分训练/验证。
+    \item 使用 \texttt{HATDataset} 将长文档切成最多 $N$ 个片段、每片段长度 $K{=}512$，保障长文本覆盖。
+    \item \texttt{MLMDataCollator} 以 15\% 的概率对 token 进行随机 Mask（含替换/保持/置空），并对 input/label pad 对齐保持批次形状一致。
+\end{itemize}
+\paragraph{关键技术}
+\begin{itemize}
+    \item HAT MLM 结构（内部自动添加 CLS），AdamW（lr 5e-5，weight decay 0.01），线性 warmup（总步数的 6\%）+线性衰减，梯度裁剪阈值 1.0，最大 10k step，batch size 视显存调整。
+    \item 正则与稳健性：启用 EMA（衰减 0.999）维护滑动平均权重以提升泛化；检测 NaN loss 并跳过异常 step。
+    \item 验证与保存：每 200 step 在验证集上评估 loss / perplexity，按最优验证 loss 保存 \texttt{best\_model.pt}，并周期性保存 checkpoint 便于恢复。
+\end{itemize}
+\paragraph{训练效果}
+\begin{itemize}
+    \item 在上述设置下，MLM loss 从初始 9.12 下降到 6.89，证明模型有效学习了领域分布。
 \end{itemize}
 
-\subsection{Loss 函数设计}
-在分类微调阶段，我们使用 \textbf{加权交叉熵损失函数 (Weighted Cross Entropy Loss)}。
-
-\[ L = - \sum_{c=1}^{M} w_c \cdot y_{o,c} \log(p_{o,c}) \]
-
-其中：
+\subsection{分类训练}
+\paragraph{整体流程}
+分类阶段采用 Stratified K-Fold（默认 5 折，种子 42）保持各折标签分布一致。每折训练 K-1 份、验证 1 份，保存 \texttt{hat\_cls\_fold\{k\}\_best.pt}，最终用于多折集成。
+\paragraph{数据与批处理}
 \begin{itemize}
-    \item $M=14$ 为类别数。
-    \item $y$ 为真实标签（One-hot），$p$ 为模型预测概率。
-    \item \textbf{最小化含义}：交叉熵衡量的是两个概率分布的差异。最小化该 Loss 等价于最大化模型预测正确类别的似然概率，使预测分布无限接近真实分布。
-    \item \textbf{权重 $w_c$}：针对类别不平衡，我们使用 `inverse_sqrt` 方法计算权重：$w_c = 1 / \sqrt{N_c}$。这使得少数类样本在梯度更新中拥有更大的话语权，防止模型偏向预测多数类。
+    \item 数据源为 \texttt{data/processed/train.csv}（文本 + 标签），使用 \texttt{HATDataset}（mode=train）将长文档切片为最多 $N$ 段、每段 $K{=}512$，输出不含 CLS 的 \([N,K]\)。
+    \item \texttt{HATDataCollator} 打包批次，得到 \([B,N,K]\) 的 \texttt{input\_ids}/\texttt{attention\_mask} 和 \([B]\) 的标签；默认 train/eval batch 分别 64/128，dataloader worker=4。
+\end{itemize}
+\paragraph{模型与初始化}
+\begin{itemize}
+    \item 模型为 \texttt{HATInterleaved512ForClassification}（\texttt{create\_model} + \texttt{HATConfig}），内部自动添加 CLS 并输出 logits。
+    \item 可加载 MLM 预训练权重 \texttt{checkpoints/mlm\_hat512/hat\_mlm\_final.pt} 进行初始化，若未提供则随机初始化。
+\end{itemize}
+\paragraph{损失与采样}
+\begin{itemize}
+    \item 损失函数通过 \texttt{create\_loss\_fn} 选择：\texttt{ce}、\texttt{smooth}（默认，label smoothing=0.05）、\texttt{focal}、\texttt{focal\_smooth}（gamma=2.0）。类别权重从 \texttt{class\_weights.npy} 加载，缓解类别不平衡。
+    \item 可选 \texttt{WeightedRandomSampler} 按样本权重重采样，进一步平衡长尾。
+\end{itemize}
+\paragraph{训练策略}
+\begin{itemize}
+    \item 优化器 AdamW（lr 3e-5，weight decay 0.01，betas 0.9/0.999，eps 1e-8），线性 warmup（6\% 总步数）后线性衰减；默认 5 个 epoch，总步数 = batch 数 × epoch。
+    \item 梯度裁剪阈值 1.0；可选 AMP 混合精度加速与省显存；可选 EMA（decay 0.9999）维护滑动平均权重，验证时优先用 EMA 模型。
+    \item 每 50 step 打印训练日志（loss、lr、吞吐），按 step 推进 scheduler；遇 NaN loss 跳过该 step。
+\end{itemize}
+\paragraph{验证与早停}
+\begin{itemize}
+    \item 每个 epoch 结束在当前折验证集评估 loss / accuracy / macro-F1，使用 EMA 权重（若启用）；选取 macro-F1 最优的权重保存为 \texttt{hat\_cls\_fold\{k\}\_best.pt}，并可同时保存原始权重以便继续训练。
+    \item 支持 early stopping（基于 macro-F1，无提升达 patience 即停止），每折结束后清理显存再训练下一折。
+\end{itemize}
+\paragraph{结果与使用}
+\begin{itemize}
+    \item 记录各折最佳 macro-F1 及路径，给出均值/方差作为稳健性指标；推理阶段可加载全部折的最佳权重做集成提升稳定性。
+\end{itemize}
+
+\subsection{第二阶段微调}
+\paragraph{目标与流程}
+在 Stage1 基础上，对每个 \texttt{hat\_cls\_fold\{k\}\_best.pt} 进行小学习率二次微调；若 Stage2 的最佳 F1 不低于 Stage1，则替换为 \texttt{hat\_cls\_fold\{k\}\_stage2\_best.pt}，否则沿用原模型。
+\paragraph{数据与增强}
+\begin{itemize}
+    \item 仍使用 \texttt{train.csv} 全量数据与同一 K 折划分；验证集缓存切分，训练集关闭缓存。
+    \item 自定义 \texttt{Stage2HATDataset} 引入 token 级随机滑窗起点（stride 默认 128），仅训练时开启以增加样本多样性；\texttt{HATDataCollator} 负责批处理。
+\end{itemize}
+\paragraph{训练与正则}
+\begin{itemize}
+    \item 小学习率 AdamW（lr 1e-5，weight decay 0.01），warmup 5\%，epoch 1\textasciitilde{}2，batch 64/128，梯度裁剪 1.0，支持 AMP。
+    \item 可选 EMA（decay 0.9999）用于验证/保存；可选 R-Drop（一批双前向+KL，系数 0.5）提升一致性。
+    \item 可选 FGM 对抗训练（embedding 层 \(\epsilon{=}0.5\)，对抗损失权重 1.0），与 R-Drop/AMP 兼容。
+\end{itemize}
+\paragraph{验证与保存}
+\begin{itemize}
+    \item 每个 epoch 结束在当前折验证集计算 loss / Acc / macro-F1；仅当 Stage2 F1 \(\ge\) Stage1 最优时保存 Stage2 权重，否则保留 Stage1。
+    \item 训练过程中按 step 记录 CE/KL 及 lr/吞吐，支持 early stopping（默认 patience=1）。
+\end{itemize}
+\paragraph{结果与分析}
+\begin{itemize}
+    \item 实测 Stage2 未能显著超过 Stage1（微调后 F1 持平或略降），最终沿用 Stage1 权重。
+    \item 可能原因：Stage1 已接近性能上限，小学习率+少量 step 难以带来有效优化；R-Drop/FGM 等正则增加噪声，收益被短程训练抵消；随机滑窗带来的分布漂移在有限步内未收敛。
+\end{itemize}
+
+\section{推理部署}
+\paragraph{整体流程}
+推理阶段通过 \texttt{infer\_kfold.py} 自动收集各折模型（优先使用 Stage2 \texttt{hat\_cls\_fold\{k\}\_stage2\_best.pt}，缺失则回退 Stage1 \texttt{hat\_cls\_fold\{k\}\_best.pt}），拼接为逗号分隔的路径后调用 \texttt{infer.py} 完成滑窗 + 多模型集成推理，生成提交文件。
+\paragraph{数据与滑窗}
+\begin{itemize}
+    \item \textbf{Dataset/Collator}：\texttt{InferenceDataset} 对每条样本保留 doc\_id 并在 collator 中展开全部滑窗；\texttt{InferenceCollator} 将每个窗口 pad 到固定 \([N,K]\)（默认 8×512），再堆叠为 \([B_{total},N,K]\)。
+    \item \textbf{窗口 TTA}：支持 token offset 列表（如 \texttt{--window-tta-offsets 0,64}），为同一文档生成多视角窗口集合，提升鲁棒性。
+\end{itemize}
+\paragraph{模型加载与加权}
+\begin{itemize}
+    \item 多 checkpoint 由 \texttt{load\_models} 加载；若 ckpt 内含 \texttt{val\_macro\_f1}，则按该分数归一化为模型权重，否则使用均匀权重。
+    \item 推理可在 GPU/CPU 运行，支持 \texttt{--num-workers} 控制 DataLoader 并行。
+\end{itemize}
+\paragraph{推理技术要点}
+\begin{itemize}
+    \item \textbf{滑窗聚合}：对同一文档的多窗口 logits 先做窗口级聚合（\texttt{mean} / \texttt{max} / \texttt{mean\_conf} 置信度加权均值），得到文档级 logits。
+    \item \textbf{多模型集成}：在模型维度再聚合（\texttt{logits\_avg} / \texttt{prob\_avg} / \texttt{voting}，均支持 \texttt{*\_weighted} 按验证分数加权），默认 \texttt{prob\_avg\_weighted}（在 \texttt{infer\_kfold.py} 中）或 \texttt{logits\_avg}（在 \texttt{infer.py} 中）。
+    \item \textbf{MC Dropout}：\texttt{--mc-dropout-runs} $>1$ 时仅开启 Dropout 层训练态，多次前向取均值，提供不确定性平滑。
+    \item \textbf{阈值策略}：支持二分类阈值 \texttt{--decision-threshold}，或多类逐类阈值 \texttt{--class-thresholds}；若提供验证集，可用 \texttt{--tune-class-thresholds} + 网格搜索自动找统一阈值。
+\end{itemize}
+\paragraph{校验与输出}
+\begin{itemize}
+    \item 可选验证集 sanity check：在 val 集上跑完整推理链路评估 Macro-F1/Acc，验证聚合与阈值配置的合理性。
+    \item 默认输出天池提交格式 CSV（可指定 sample\_submit 校验列名），并可选保存聚合 logits 方便分析。
+\end{itemize}
+\paragraph{实际表现}
+\begin{itemize}
+    \item 在本任务中，Stage2 模型未优于 Stage1，\texttt{infer\_kfold.py} 会自动优先使用存在的 Stage2 ckpt；若缺失则回退 Stage1，保证推理流程稳定。
 \end{itemize}
 
 \section{实验总结与感悟}
 
+这次做长文本分类，最大的收获是“先把链路跑通，再慢慢抠细节”。一开始总想一步到位上所有花活，但显存、时长都把我们掐得死死的。后来改成先用最小可行方案通关，再逐块替换成 HAT、滑窗、集成，反而节奏更稳。
 
+长文本处理的两个坑印象最深：其一是切分策略，末尾片段太短会把信息丢光，Tail Segment Pullback 确实帮了大忙；其二是类别不平衡，class weight + sampler 组合比我们原来只用一种手段稳得多。另一个小教训是 Stage2 微调：理论上应该更好，但短程微调加随机滑窗带来的分布漂移，把收益抵消了，提醒我们“没必要的套路就别硬上”。
+
+调参心得：学习率、warmup 比想象中敏感，尤其是带 EMA 时，稍大的 lr 会导致 EMA 权重“跟不上节奏”，验证集抖动明显；梯度裁剪和 AMP 基本是白送的稳定性提升，可以默认开。日志和 checkpoint 也要勤做，遇到 NaN 能快速回溯。
+
+推理阶段，滑窗聚合 + 多模型加权的组合挺香，但要注意推理时长与提交截止的平衡；我们最后保留了 window TTA 的接口，但默认不开，以免超时。整体体验下来，K 折 + 加权集成是当前资源约束下最稳妥的解。
+
+如果有更多时间，想补的方向有：更长的预训练步数（或更好的预训练数据），尝试对比 Hyena / Mamba 这类长序列模型，和更系统的阈值调优。但至少目前的方案在可靠性和复现性上已经可落地。
 \end{document}
