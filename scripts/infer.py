@@ -45,7 +45,9 @@ from collections import defaultdict
 import numpy as np
 import pandas as pd
 import torch
+import torch.distributed as dist
 from torch.utils.data import Dataset, DataLoader
+from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm
 
 # 添加项目根目录到 path
@@ -187,6 +189,18 @@ def parse_args():
         type=int,
         default=4,
         help='DataLoader worker 数'
+    )
+    parser.add_argument(
+        '--dist-backend',
+        type=str,
+        default='nccl',
+        help='分布式后端（torchrun 自动设置 env 时推荐 nccl）'
+    )
+    parser.add_argument(
+        '--dist-url',
+        type=str,
+        default='env://',
+        help='分布式初始化方式（默认使用 torchrun/env 变量）'
     )
     
     # 聚合策略
@@ -505,6 +519,8 @@ def infer_single_model(
     num_labels: int,
     window_agg: str = 'mean',
     mc_dropout_runs: int = 1,
+    show_progress: bool = True,
+    progress_desc: str = "Inference",
 ) -> Dict[int, torch.Tensor]:
     """
     对单个模型进行推理，并在窗口维度聚合
@@ -529,7 +545,7 @@ def infer_single_model(
     # 按 doc_id 收集窗口 logits
     doc_window_logits = defaultdict(list)  # doc_id -> [Tensor[num_labels], ...]
     
-    for batch in tqdm(test_loader, desc="Inference", leave=False):
+    for batch in tqdm(test_loader, desc=progress_desc, leave=False, disable=not show_progress):
         input_ids = batch["input_ids"].to(device)       # [B, N, K]
         attention_mask = batch["attention_mask"].to(device)  # [B, N, K]
         doc_ids = batch["doc_ids"]                       # [B]
@@ -595,6 +611,8 @@ def run_inference(
     mc_dropout_runs: int = 1,
     decision_threshold: Optional[float] = None,
     class_thresholds: Optional[np.ndarray] = None,
+    is_main_process: bool = True,
+    progress_desc: str = "Inference",
 ) -> Tuple[Dict[int, int], Dict[int, np.ndarray]]:
     """
     多模型 ensemble 推理
@@ -619,7 +637,8 @@ def run_inference(
     # logits_dict[doc_id] -> List[Tensor[num_labels]]，每个元素是一个模型的聚合 logits
     logits_dict = defaultdict(list)
     
-    log_print(f"\n开始 Ensemble 推理 (window_agg={window_agg}, model_agg={model_agg})...")
+    if is_main_process:
+        log_print(f"\n开始 Ensemble 推理 (window_agg={window_agg}, model_agg={model_agg})...")
     
     # 预处理模型权重
     weight_tensor: Optional[torch.Tensor] = None
@@ -627,7 +646,8 @@ def run_inference(
         weight_tensor = torch.as_tensor(model_weights, dtype=torch.float32)
     
     for i, model in enumerate(models):
-        log_print(f"\n  模型 [{i+1}/{len(models)}] 推理中...")
+        if is_main_process:
+            log_print(f"\n  模型 [{i+1}/{len(models)}] 推理中...")
         
         # 获取该模型对每个 doc 的 logits（已窗口聚合）
         doc_logits = infer_single_model(
@@ -637,6 +657,8 @@ def run_inference(
             num_labels=num_labels,
             window_agg=window_agg,
             mc_dropout_runs=mc_dropout_runs,
+            show_progress=is_main_process,
+            progress_desc=progress_desc,
         )
         
         # 添加到聚合容器
@@ -647,7 +669,8 @@ def run_inference(
     preds = {}
     ensemble_logits = {}
     
-    log_print("\n  模型级聚合...")
+    if is_main_process:
+        log_print("\n  模型级聚合...")
     
     # 预处理阈值
     class_thresholds_tensor = None
@@ -713,6 +736,34 @@ def run_inference(
         ensemble_logits[doc_id] = agg_logits.numpy()
     
     return preds, ensemble_logits
+
+
+def gather_predictions(
+    preds: Dict[int, int],
+    ensemble_logits: Dict[int, np.ndarray],
+    distributed: bool,
+    rank: int,
+    world_size: int,
+) -> Tuple[Optional[Dict[int, int]], Optional[Dict[int, np.ndarray]]]:
+    """
+    在分布式环境下收集各 rank 的预测结果，仅返回 rank0 的合并结果。
+    """
+    if not distributed:
+        return preds, ensemble_logits
+    
+    payload = (preds, ensemble_logits)
+    gathered: List[Tuple[Dict[int, int], Dict[int, np.ndarray]]] = [None for _ in range(world_size)]  # type: ignore
+    dist.all_gather_object(gathered, payload)
+    
+    if rank != 0:
+        return None, None
+    
+    merged_preds: Dict[int, int] = {}
+    merged_logits: Dict[int, np.ndarray] = {}
+    for p, l in gathered:
+        merged_preds.update(p)
+        merged_logits.update(l)
+    return merged_preds, merged_logits
 
 
 # =============================================================================
@@ -788,6 +839,10 @@ def evaluate_on_val(
     class_thresholds: Optional[np.ndarray] = None,
     tune_class_thresholds: bool = False,
     threshold_grid: Optional[List[float]] = None,
+    distributed: bool = False,
+    world_size: int = 1,
+    rank: int = 0,
+    is_main_process: bool = True,
 ) -> None:
     """
     在验证集上评估（sanity check）
@@ -795,7 +850,8 @@ def evaluate_on_val(
     from sklearn.metrics import f1_score, accuracy_score
     from src.data_preprocess import create_tokenizer, create_segmenter
     
-    log_print(f"\n在验证集上进行 Sanity Check: {val_path}")
+    if is_main_process:
+        log_print(f"\n在验证集上进行 Sanity Check: {val_path}")
     
     # 读取验证数据
     df = pd.read_csv(val_path, sep='\t')
@@ -817,6 +873,16 @@ def evaluate_on_val(
     
     collator = InferenceCollator()
     
+    val_sampler = None
+    if distributed:
+        val_sampler = DistributedSampler(
+            val_dataset,
+            num_replicas=world_size,
+            rank=rank,
+            shuffle=False,
+            drop_last=False,
+        )
+    
     val_loader = DataLoader(
         val_dataset,
         batch_size=batch_size,
@@ -824,6 +890,7 @@ def evaluate_on_val(
         num_workers=num_workers,
         collate_fn=collator,
         pin_memory=True,
+        sampler=val_sampler,
     )
     
     # 推理
@@ -838,7 +905,20 @@ def evaluate_on_val(
         mc_dropout_runs=mc_dropout_runs,
         decision_threshold=decision_threshold,
         class_thresholds=class_thresholds,
+        is_main_process=is_main_process,
+        progress_desc="Val Inference",
     )
+    
+    preds, ensemble_logits = gather_predictions(
+        preds=preds,
+        ensemble_logits=ensemble_logits,
+        distributed=distributed,
+        rank=rank,
+        world_size=world_size,
+    )
+    
+    if not is_main_process:
+        return
     
     # 评估
     labels_pred = [preds[doc_id] for doc_id in doc_ids]
@@ -894,12 +974,32 @@ def evaluate_on_val(
 def main():
     args = parse_args()
     
+    # 分布式设置
+    env_world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    world_size = max(env_world_size, 1)
+    rank = int(os.environ.get("RANK", "0"))
+    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+    distributed = world_size > 1
+    is_main_process = rank == 0
+    
+    if distributed:
+        if torch.cuda.is_available():
+            torch.cuda.set_device(local_rank)
+        dist.init_process_group(backend=args.dist_backend, init_method=args.dist_url)
+    
     # 设备
-    device = torch.device(args.device if torch.cuda.is_available() else 'cpu')
-    log_print(f"使用设备: {device}")
-    if device.type == 'cuda':
-        log_print(f"  GPU: {torch.cuda.get_device_name(0)}")
-        log_print(f"  显存: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f} GB")
+    if args.device.startswith('cuda') and torch.cuda.is_available():
+        device = torch.device(f"cuda:{local_rank}" if distributed else args.device)
+    else:
+        device = torch.device('cpu')
+    
+    if is_main_process:
+        log_print(f"使用设备: {device}")
+        if distributed:
+            log_print(f"  分布式: world_size={world_size}, rank={rank}, local_rank={local_rank}")
+        if device.type == 'cuda':
+            log_print(f"  GPU: {torch.cuda.get_device_name(0)}")
+            log_print(f"  显存: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f} GB")
     
     # ========== 1. 加载模型 ==========
     models, model_weights = load_models(args.model_paths, device)
@@ -917,20 +1017,22 @@ def main():
     # 获取 num_labels
     from src.common_config import COMMON_CONFIG
     num_labels = COMMON_CONFIG.num_labels
-    log_print(f"\n类别数: {num_labels}")
+    if is_main_process:
+        log_print(f"\n类别数: {num_labels}")
     
     if class_thresholds and len(class_thresholds) != num_labels:
         raise ValueError(
             f"class-thresholds 长度({len(class_thresholds)})需等于 num_labels({num_labels})"
         )
     
-    log_print(f"窗口 TTA offsets: {window_tta_offsets}")
-    if args.mc_dropout_runs > 1:
-        log_print(f"MC Dropout 前向次数: {args.mc_dropout_runs}")
-    if args.decision_threshold is not None:
-        log_print(f"二分类阈值: {args.decision_threshold}")
-    if class_thresholds:
-        log_print(f"类别阈值: {class_thresholds}")
+    if is_main_process:
+        log_print(f"窗口 TTA offsets: {window_tta_offsets}")
+        if args.mc_dropout_runs > 1:
+            log_print(f"MC Dropout 前向次数: {args.mc_dropout_runs}")
+        if args.decision_threshold is not None:
+            log_print(f"二分类阈值: {args.decision_threshold}")
+        if class_thresholds:
+            log_print(f"类别阈值: {class_thresholds}")
     
     # ========== 2. 可选：验证集 sanity check ==========
     if args.val_path and Path(args.val_path).exists():
@@ -950,10 +1052,17 @@ def main():
             class_thresholds=class_thresholds,
             tune_class_thresholds=args.tune_class_thresholds,
             threshold_grid=threshold_grid,
+            distributed=distributed,
+            world_size=world_size,
+            rank=rank,
+            is_main_process=is_main_process,
         )
+        if distributed:
+            dist.barrier()
     
     # ========== 3. 构建测试集 DataLoader ==========
-    log_print(f"\n加载测试数据: {args.test_path}")
+    if is_main_process:
+        log_print(f"\n加载测试数据: {args.test_path}")
     
     from src.data_preprocess import create_tokenizer, create_segmenter
     
@@ -962,7 +1071,8 @@ def main():
     texts = test_df['text'].tolist()
     doc_ids = list(range(len(texts)))  # 使用行索引作为 doc_id
     
-    log_print(f"  测试样本数: {len(texts)}")
+    if is_main_process:
+        log_print(f"  测试样本数: {len(texts)}")
     
     tokenizer = create_tokenizer()
     segmenter = create_segmenter()
@@ -977,13 +1087,24 @@ def main():
     
     collator = InferenceCollator()
     
+    sampler = None
+    if distributed:
+        sampler = DistributedSampler(
+            test_dataset,
+            num_replicas=world_size,
+            rank=rank,
+            shuffle=False,
+            drop_last=False,
+        )
+    
     test_loader = DataLoader(
         test_dataset,
         batch_size=args.batch_size,
-        shuffle=False,  # 重要：保持顺序
+        shuffle=False,  # 保持顺序（DistributedSampler 内部分片）
         num_workers=args.num_workers,
         collate_fn=collator,
         pin_memory=True,
+        sampler=sampler,
     )
     
     # ========== 4. 推理 ==========
@@ -1000,7 +1121,22 @@ def main():
         mc_dropout_runs=args.mc_dropout_runs,
         decision_threshold=args.decision_threshold,
         class_thresholds=class_thresholds,
+        is_main_process=is_main_process,
+        progress_desc="Test Inference",
     )
+    
+    preds, ensemble_logits = gather_predictions(
+        preds=preds,
+        ensemble_logits=ensemble_logits,
+        distributed=distributed,
+        rank=rank,
+        world_size=world_size,
+    )
+    
+    if not is_main_process:
+        if distributed:
+            dist.destroy_process_group()
+        return
     
     elapsed = time.time() - start_time
     log_print(f"\n推理完成，耗时: {elapsed:.1f} 秒")
@@ -1020,6 +1156,9 @@ def main():
         log_print(f"Logits 已保存到: {logits_path}")
     
     log_print("\n✓ 推理完成！")
+    
+    if distributed:
+        dist.destroy_process_group()
 
 
 if __name__ == "__main__":

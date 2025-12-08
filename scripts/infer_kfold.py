@@ -125,6 +125,24 @@ def parse_args():
         default=1,
         help='MC Dropout 前向次数，>1 时推理阶段保持 Dropout 开启'
     )
+    parser.add_argument(
+        '--nproc-per-node',
+        type=int,
+        default=None,
+        help='每节点并行进程数（传给 torchrun 以启用多 GPU 推理）'
+    )
+    parser.add_argument(
+        '--dist-backend',
+        type=str,
+        default='nccl',
+        help='分布式后端，torchrun 环境推荐 nccl'
+    )
+    parser.add_argument(
+        '--dist-url',
+        type=str,
+        default='env://',
+        help='分布式初始化方式（默认使用 env://，配合 torchrun）'
+    )
     
     parser.add_argument(
         '--decision-threshold',
@@ -207,8 +225,11 @@ def main():
     # 查找所有 K-fold 模型
     model_paths = find_kfold_models(args.kfold_dir)
     model_paths_str = ",".join(model_paths)
+    nproc_per_node = args.nproc_per_node or int(os.environ.get("NPROC_PER_NODE", "1"))
+    nproc_per_node = max(1, nproc_per_node)
     
     log_print(f"\n使用 {len(model_paths)} 个模型进行 Ensemble 推理")
+    log_print(f"并行进程数（per node）: {nproc_per_node}")
     log_print(f"窗口聚合: {args.window_agg}, 模型聚合: {args.model_agg}")
     log_print(f"窗口 TTA offsets: {args.window_tta_offsets}")
     if args.mc_dropout_runs > 1:
@@ -224,20 +245,32 @@ def main():
     # 构建 infer.py 命令
     infer_script = PROJECT_ROOT / "scripts" / "infer.py"
     
-    cmd = [
-        sys.executable,
-        str(infer_script),
-        "--test-path", args.test_path,
-        "--model-paths", model_paths_str,
-        "--output-path", args.output_path,
-        "--batch-size", str(args.batch_size),
-        "--device", args.device,
-        "--num-workers", str(args.num_workers),
-        "--window-agg", args.window_agg,
-        "--model-agg", args.model_agg,
-        "--window-tta-offsets", args.window_tta_offsets,
-        "--mc-dropout-runs", str(args.mc_dropout_runs),
-    ]
+    launcher = []
+    if nproc_per_node > 1:
+        launcher = ["torchrun", f"--nproc_per_node={nproc_per_node}"]
+    
+    cmd = (
+        launcher
+        + (
+            [str(infer_script)]
+            if launcher
+            else [sys.executable, str(infer_script)]
+        )
+        + [
+            "--test-path", args.test_path,
+            "--model-paths", model_paths_str,
+            "--output-path", args.output_path,
+            "--batch-size", str(args.batch_size),
+            "--device", args.device,
+            "--num-workers", str(args.num_workers),
+            "--window-agg", args.window_agg,
+            "--model-agg", args.model_agg,
+            "--window-tta-offsets", args.window_tta_offsets,
+            "--mc-dropout-runs", str(args.mc_dropout_runs),
+            "--dist-backend", args.dist_backend,
+            "--dist-url", args.dist_url,
+        ]
+    )
     
     if args.val_path:
         cmd.extend(["--val-path", args.val_path])

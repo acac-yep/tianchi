@@ -2,8 +2,8 @@
 #SBATCH -J test_dynamic_pp
 #SBATCH -p gpu
 #SBATCH -N 1
-#SBATCH --gpus-per-node=1
-#SBATCH -t 12:00:00
+#SBATCH --gpus-per-node=4
+#SBATCH -t 24:00:00
 #SBATCH -o slurm-infer-%j.out
 
 # ============================================================================
@@ -82,6 +82,10 @@ THRESHOLD_GRID="0.30,0.35,0.40,0.45,0.50,0.55,0.60"  # 搜索网格
 # 设备与并行
 DEVICE="cuda"
 NUM_WORKERS=4
+NPROC_PER_NODE="${NPROC_PER_NODE:-${SLURM_GPUS_ON_NODE:-1}}"  # 默认使用节点全部 GPU
+MASTER_PORT="${MASTER_PORT:-29500}"
+export MASTER_ADDR="${MASTER_ADDR:-127.0.0.1}"
+export MASTER_PORT
 # ============================================================================
 
 echo "=== 配置信息 ==="
@@ -97,6 +101,7 @@ echo "模型聚合: ${MODEL_AGG}"
 echo "保存 logits: ${SAVE_LOGITS}"
 echo "窗口 TTA offsets: ${WINDOW_TTA_OFFSETS}"
 echo "MC Dropout runs: ${MC_DROPOUT_RUNS}"
+echo "每节点进程数: ${NPROC_PER_NODE}"
 if [ -n "${DECISION_THRESHOLD}" ]; then
   echo "二分类阈值: ${DECISION_THRESHOLD}"
 fi
@@ -118,6 +123,9 @@ CMD=(
   --num-workers ${NUM_WORKERS}
   --window-tta-offsets "${WINDOW_TTA_OFFSETS}"
   --mc-dropout-runs ${MC_DROPOUT_RUNS}
+  --nproc-per-node ${NPROC_PER_NODE}
+  --dist-backend nccl
+  --dist-url env://
 )
 
 if [ -n "${VAL_PATH}" ]; then
@@ -145,7 +153,7 @@ echo "  ${CMD[@]}"
 echo ""
 
 # 执行推理
-CUDA_VISIBLE_DEVICES=0 "${CMD[@]}"
+"${CMD[@]}"
 
 echo ""
 echo "=== K-Fold 推理完成 ==="
