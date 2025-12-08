@@ -25,12 +25,18 @@
 }
 
 \title{\textbf{NLP新闻分类学习赛\\实验报告}}
-\author{\textbf{队伍名：Attention请注意我} \\ 排名：第 3 名}
+\author{\textbf{队伍名：Attention请注意我} \\ 郑亦航 PB23111 \\ 李梓煊 PB23111709}
 \date{\today}
+
+
 
 \begin{document}
 
 \maketitle
+
+\begin{abstract}
+本队在 NLP 新闻分类学习赛中以准确率 0.962 获得第 3 名，成绩排名截图已置于文末附录以供查阅。
+\end{abstract}
 
 \section{团队成员与分工}
 
@@ -444,4 +450,12 @@
 推理阶段，滑窗聚合结合多模型加权的方案效果显著，但需要注意推理耗时与提交截止时间之间的平衡。我们在最终方案中保留了滑窗 TTA 接口，但默认关闭以避免超时。在当前资源约束下，K 折训练加权集成是最稳妥的解决方案。
 
 如果有更多时间，我们希望完善的方向包括：延长预训练步数（或采用更高质量的预训练数据）、尝试引入 Hyena、Mamba 等新型长序列模型，以及对阈值进行更系统的调优。不过当前的方案在可靠性和复现性上已经达到较为满意的程度。
+
+\appendix
+\section{成绩排名截图}
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=0.8\textwidth]{graph/rank.png}
+    \caption{成绩排名截图}
+\end{figure}
 \end{document}
