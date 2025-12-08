@@ -402,11 +402,13 @@
     \item 支持可选阈值策略：二分类可以设置统一阈值，多分类可以为不同类别单独设置阈值；若提供验证集，可通过网格搜索自动调节。
 \end{itemize}
 
-\subsection{输出与稳定性}
-
-推理脚本支持在验证集上跑完整链路做一次 sanity check，以确认聚合和阈值设定合理。最终按照天池要求输出提交用 CSV，并可选择额外保存中间 logits 方便后续分析。  
-在本任务中，虽然实现了 Stage2 微调，但最终线上结果主要由 Stage1 K 折集成模型贡献，推理流程对是否存在 Stage2 权重具有良好的兼容性。
-
+\subsection{分布式推理}
+\begin{itemize}
+    \item 启动方式：当 \texttt{infer\_kfold.py} 检测到 \texttt{--nproc-per-node} 大于 1 时，会自动切换为 \texttt{torchrun} 启动；\texttt{infer.py} 在入口处读取 \texttt{WORLD\_SIZE}、\texttt{RANK}、\texttt{LOCAL\_RANK} 等环境变量，使用 \texttt{torch.distributed.init\_process\_group}（默认 \texttt{nccl}）完成初始化，并为每个 rank 绑定对应 GPU。
+    \item 数据分片：数据加载阶段使用 \texttt{DistributedSampler} 对滑窗后的推理数据集按 rank 分片，保证各进程处理不同样本且不打乱整体顺序，节省重复计算。验证集 sanity check 也复用同样的分布式数据管道。
+    \item 推理聚合：每个进程独立完成“窗口聚合 + 模型集成”，得到局部的 \texttt{doc\_id → logits/label}，随后通过 \texttt{all\_gather\_object} 汇总到 rank0，再统一保存提交文件（可选同时保存 logits）。避免了跨进程频繁通信，仅在最终阶段做一次收敛。
+    \item 资源与容错：\texttt{infer\_kfold.py} 对未指定 \texttt{--nproc-per-node} 的情况回退为单进程，避免误用；SLURM 脚本中则基于节点 GPU 数自动填充该参数，并显式设置 \texttt{MASTER\_ADDR/PORT}、\texttt{LD\_LIBRARY\_PATH} 与 \texttt{PYTORCH\_CUDA\_ALLOC\_CONF}，以保证在多 GPU 环境下的稳定性和显存可扩展分配。
+\end{itemize}
 
 \section{实验总结与感悟}
 
