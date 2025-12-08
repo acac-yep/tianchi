@@ -79,105 +79,174 @@
 
 \section{数据分析与预处理}
 
-本章节详细阐述对原始数据集的统计分析过程以及为适配模型而设计的数据清洗流水线。
-
 \subsection{数据特征分析}
-我们编写了 `TextLengthAnalyzer` 和 `ClassDistributionAnalyzer` 脚本，对 200,000 条训练样本和 50,000 条测试样本进行了详尽的统计分析。
+我们使用自行开发的 \texttt{analyze\_dataset.py} 脚本（调用内部 \texttt{TextLengthAnalyzer} 和 \texttt{ClassDistributionAnalyzer} 模块），对 200,000 条训练样本和 50,000 条测试样本进行了全量扫描。
 
-\subsubsection{文本长度分布}
-分析结果显示，文本长度呈现显著的长尾分布。
+\subsubsection{类别分布与不平衡}
+分析结果显示，本任务为 14 类单标签分类任务，类别分布呈现极度长尾特征。
 \begin{itemize}
-    \item \textbf{统计数据}：训练集文本平均长度（Mean）约为 907 tokens，中位数（Median）为 676。P90 分位点达到 1,796，P95 为 2,457，P99 更是高达 4,228，最长文本甚至接近 58,000 tokens。
-    \item \textbf{覆盖率分析}：若采用传统 BERT 的 512 长度截断，将丢失绝大部分样本的尾部信息。统计表明，当截断长度设定为 4096 时，Token 覆盖率可达 97\%，超过 10k tokens 的极端长文占比仅为 0.08\%。
-    \item \textbf{结论}：4096 是一个兼顾覆盖率与计算开销的理想上下文窗口长度。
+    \item \textbf{极端不平衡}：最大类别（Label 0）拥有 38,918 条样本，而最小类别（Label 13）仅 908 条。最大最小比（Imbalance Ratio）高达 \textbf{43:1}。
+    \item \textbf{策略启示}：如此悬殊的比例要求我们在 Loss 设计上必须引入类别平衡手段（如 Class Weighting 或 Focal Loss），否则模型将完全偏向头部类别。
 \end{itemize}
 
-\subsubsection{类别不平衡与词表}
-数据共包含 14 个类别，类别分布极不平衡，最大类与最小类的样本比例约为 43:1。词汇表（Vocab）总规模约为 6,977，Token ID 范围为 0-7549，未登录词（OOV）极低。这提示我们需要在 Loss 函数层面引入类别平衡策略。
+\subsubsection{文本长度统计}
+文本长度是选择模型架构的关键依据。统计结果表明数据包含大量超长文本：
+\begin{itemize}
+    \item \textbf{统计指标}：训练集文本平均长度（Mean）约为 907 tokens，中位数（Median）为 676。P90 分位点达到 1,796，P99 高达 4,228，最长文本甚至接近 58,000 tokens。
+    \item \textbf{覆盖率分析}：
+    \begin{itemize}
+        \item 若截断到 BERT 标准的 512 长度，仅能完整覆盖约 37\% 的样本。
+        \item 当上下文窗口扩展至 \textbf{4096} 时，样本完整覆盖率达到 \textbf{98.89\%}，Token 级别覆盖率达到 97.37\%。超过 10k tokens 的极端长文仅占 0.08\%。
+    \end{itemize}
+    \item \textbf{结论}：4096 是一个兼顾信息完整度与计算开销的理想上下文窗口长度，这直接确立了我们使用长文档模型（HAT）的必要性。
+\end{itemize}
+
+\subsubsection{词汇表 (Vocab)}
+数据已经过匿名化处理，Token ID 原始分布在 0--7549 之间，总词表规模约为 6,977。
+\begin{itemize}
+    \item \textbf{特殊 Token 冲突}：分析发现 ID 0, 1, 2, 3, 4 在原始数据中均有出现。这意味着我们不能直接使用常规的 0(PAD), 1(UNK) 等定义，必须进行 ID 偏移映射。
+    \item \textbf{OOV 情况}：测试集中未登录词（OOV）极低（仅占 token 总数 0.0004\%），表明词表覆盖极其全面。
+\end{itemize}
 
 \subsection{预处理流水线}
-基于上述分析，我们实施了以下预处理步骤。值得注意的是，数据分段操作并未在此阶段进行，预处理阶段仅输出连续的 Token 序列，分段逻辑留待模型输入层动态处理。
+基于上述分析，我们设计了轻量级的预处理脚本 \texttt{run\_preprocessing.py}。值得强调的是，\textbf{文档分段（Segmentation）并未在此阶段进行}，预处理仅负责清洗和标准化，分段逻辑交由模型输入层动态处理以支持数据增强。
 
-\subsubsection{特殊 Token 重映射}
-原始数据的 Token ID 占用了 0-4 的数值空间。为了适配 Transformer 架构所需的特殊标记，我们将所有原始 Token ID 整体偏移 +5：
+\subsubsection{Token ID 重映射}
+为解决特殊 Token 冲突，我们将所有原始 Token ID 整体向右偏移 5 位：
 \begin{equation}
-    t' = t_{raw} + 5, \quad t_{raw} \in [0, 7549]
+    t' = t_{raw} + 5, \quad t_{raw} \in [0, 7549] \rightarrow t' \in [5, 7554]
 \end{equation}
-腾出的空间用于定义：0: \texttt{[PAD]}, 1: \texttt{[UNK]}, 2: \texttt{[CLS\_SEG]}, 3: \texttt{[SEP]}, 4: \texttt{[MASK]}。重映射后的 Vocab Size 约为 7,555。
+腾出的 [0, 4] 空间严格定义如下，最终 Vocab Size 为 7,555：
+\begin{itemize}
+    \item 0: \texttt{[PAD]}, 1: \texttt{[UNK]}, 2: \texttt{[CLS\_SEG]} (用于段级聚合), 3: \texttt{[SEP]}, 4: \texttt{[MASK]} (用于预训练)。
+\end{itemize}
 
 \subsubsection{数据清洗}
-使用 `DataCleaner` 模块移除了 89 条完全重复的文本和 16 条标签冲突的样本，并去除了空文本，以保证训练数据的纯净度。
+使用 \texttt{DataCleaner} 模块执行了严格过滤：
+\begin{itemize}
+    \item \textbf{去重}：移除了 153 条完全重复的文本（保留首条）。
+    \item \textbf{冲突处理}：移除了 8 组“内容相同但标签不同”的冲突样本，避免噪声干扰。
+    \item \textbf{异常值处理}：移除了长度为 0 的空文本。
+\end{itemize}
 
 
 \section{模型设计}
 
-针对长文档分类任务，单纯截断或使用稀疏注意力（Longformer）虽能处理长文，但在捕捉层级结构方面略显不足。Chalkidis 等人的研究表明，分层 Transformer（HAT）在保持计算高效的同时，性能往往优于纯稀疏注意力模型。
-因此，我们设计了 HAT-Interleaved 512 模型作为主力架构，参数量约 90-100M，旨在充分利用 4 x H800 的算力，原生支持 4096 tokens 的上下文。
+\subsection{设计目标与约束}
+本赛题的核心在于在有限的算力和时间内，处理大规模长文本分类问题。我们的决策基于以下关键约束：
+\begin{itemize}
+    \item \textbf{数据约束}：20 万样本，约 2 亿 Token。由于数据为匿名 ID，无法利用现成预训练模型（如 BERT/LLaMA）的语义知识，必须\textbf{从零预训练}。
+    \item \textbf{算力约束}：4 $\times$ H800 GPU，预训练时间窗口约为 24 小时。
+    \item \textbf{长度约束}：需有效处理 4096 长度的上下文，且不能像截断 BERT 那样丢失尾部关键信息。
+\end{itemize}
+
+\subsection{架构选型对比}
+基于上述约束，我们对比了四种主流技术路线，分析如下表所示：
+
+\begin{table}[H]
+    \centering
+    \small
+    \caption{长文档分类主流架构对比分析}
+    \begin{tabular}{p{4cm} p{4cm} p{4cm} p{2.5cm}}
+        \toprule
+        \textbf{架构方案} & \textbf{优势} & \textbf{劣势}\\
+        \midrule
+        \textbf{大语言模型} \newline (LLaMA/Qwen 等) & 强大的生成能力与few-shot能力。 & 参数量大（7B+），需海量数据从零训练，2亿 token 极易导致过拟合；训练昂贵。 \\
+        \midrule
+        \textbf{截断版 BERT} \newline (Max Len 512) & 训练速度快，基建成熟。 & 丢失 50\%+ 信息（尤其是新闻/法律文本的尾部结论），性能上限低。\\
+        \midrule
+        \textbf{稀疏 Transformer} \newline (Longformer/BigBird) & 原生支持长上下文，复杂度 $O(N)$。 & 需要自定义 CUDA Kernel 或复杂实现；在 4k 长度下，显存优势不如分层模型明显。\\
+        \midrule
+        \textbf{层次化 Transformer} \newline (HAT/HDT) & \textbf{性价比最高}。结合了段内标准 Attention 的强特征提取与段间聚合的全局视野；显存占用低。 & 需要定制分层结构（Segment-wise + Cross-segment）。\\
+        \bottomrule
+    \end{tabular}
+    \label{tab:model_comparison}
+\end{table}
+
+\textbf{决策结论}：考虑到 200k 样本足以训练一个 1 亿参数量级（BERT-Medium/Base）的模型，且 4096 长度正好适合分层处理（如 8 个 512 的片段），我们最终选择了 \textbf{HAT (Hierarchical Attention Transformer)} 架构。它在保持计算高效的同时，能完整保留长文档的结构化语义。
 
 \subsection{总体架构概览}
-模型整体采用“分段-交互-聚合”的设计思路，主要包含四个模块：
+模型整体采用“分段-交互-聚合”的设计思路，自底向上包含四个核心模块：
 \begin{enumerate}
-    \item \textbf{分段器 (Document Segmenter)}：负责动态切分长文。
-    \item \textbf{嵌入层 (Embedding Layer)}：融合词、位置和段落信息。
-    \item \textbf{HAT Interleaved 编码器}：核心模块，包含 6 层 SWE+CSE 交互层。
-    \item \textbf{文档分类头 (Classifier)}：输出 14 类 Logits。
+    \item \textbf{动态分段器 (Document Segmenter)}：负责将长序列切分为固定长度的 Segment。
+    \item \textbf{层次化嵌入层 (Hierarchical Embeddings)}：融合词、位置和段落 ID 信息。
+    \item \textbf{HAT Interleaved 编码器}：包含 6 层 SWE+CSE 交互层，实现局部与全局信息的同步更新。
+    \item \textbf{文档分类头 (Document Classifier)}：聚合段向量输出 14 类 Logits。
 \end{enumerate}
 
-\subsection{动态分段器}
-分段操作在模型输入流水线中动态进行。给定重映射后的 Token 序列 $x = [t_1, \dots, t_L]$，目标是将其切分为 $N$ 个长度为 $K=512$ 的 Segment，且总长度控制在 4096 以内（即 $N \le 8$）。
+\subsection{动态分段器 (Dynamic Segmenter)}
+分段操作集成在 \texttt{HATDataset} 中动态进行。给定重映射后的序列 $x$，目标是将其切分为 $N$ 个长度为 $K=512$ 的 Segment，且总长度控制在 4096 以内（即 $N \le 8$）。
 
-\subsubsection{尾段回拉策略}
-直接切分可能导致最后一个 Segment 极短（例如仅剩 10 个 token），包含信息量过少且容易被 Padding 淹没。我们实现了“尾段回拉”机制：
+\subsubsection{尾段回拉策略 (Tail Pullback)}
+直接切分常导致最后一段极短（如仅 10 个 token），信息密度低且易被 Padding 干扰。我们实现了“尾段回拉”机制：
 \begin{itemize}
-    \item 若最后一段剩余长度 $r < K/2$，则放弃直接切分，改为从文档末尾向前回溯截取 $K$ 个 token 作为最后一段：
+    \item 若切分后最后一段剩余长度 $r < K/2$，则放弃直接切分，改为从文档末尾向前回溯截取 $K$ 个 token 作为最后一段：
     \begin{equation}
         Seg_{last} = x[L-K : L]
     \end{equation}
+    这保证了所有输入的 Segment 均包含充足的语义信息。
 \end{itemize}
 
-\subsubsection{长文截断策略}
+\subsubsection{长文截断与增强}
 \begin{itemize}
-    \item \textbf{训练时}：对超过 8 段的文档，采用随机窗口（Random Window）策略，随机选择连续的 8 段进行训练，起到数据增强的作用。
-    \item \textbf{推理时}：采用滑动窗口（Sliding Window），将全篇切分为多个窗口分别推理，最后对 Logits 求平均。
+    \item \textbf{训练时 (Random Window)}：对超过 8 段的文档，随机选择连续的 8 段进行训练。这不仅解决了显存限制，更作为一种强有力的数据增强手段，提升模型鲁棒性。
+    \item \textbf{推理时 (Sliding Window)}：采用滑动窗口策略，将全篇切分为多个窗口（如 [0-7], [4-11]...）分别推理，最后对 Logits 求和/平均。
 \end{itemize}
 
 \subsection{层次化嵌入层}
-输入张量形状为 $[B, N, K+1]$（$K+1$ 是因为模型为每个 Segment 插入了专用的$`CLS_{SEG}`$)。每个 Token 的嵌入表示 $h_0$ 由三部分相加而成：
+输入张量形状为 $[B, N, K+1]$（模型为每个 Segment 自动插入了 \texttt{[CLS\_SEG]}）。每个 Token 的嵌入表示 $h_0$ 由三部分相加而成：
 \begin{equation}
     h_0 = E_{word}[id] + E_{pos\_sw}[pos] + E_{seg\_id}[seg\_idx]
 \end{equation}
 \begin{itemize}
-    \item $E_{word}$: 词嵌入，维度 $[7555, 768]$。
-    \item $E_{pos\_sw}$: 段内位置嵌入，维度 $[513, 768]$。
-    \item $E_{seg\_id}$: 段落 ID 嵌入，维度 $[8, 768]$。这一项帮助模型区分当前处理的是文档的第几段，对捕捉篇章结构至关重要。
+    \item \textbf{$E_{word}$}：词嵌入，维度 $[7555, 768]$。
+    \item \textbf{$E_{pos\_sw}$}：段内位置嵌入，维度 $[513, 768]$，捕捉局部语序。
+    \item \textbf{$E_{seg\_id}$}：\textbf{段落 ID 嵌入}，维度 $[8, 768]$。这是 HAT 的关键设计，显式告知模型当前处理的是文档的第几段，增强了模型对篇章结构的感知能力。
 \end{itemize}
 
 \subsection{HAT Interleaved 编码器}
-不同于先处理完所有局部特征再做全局聚合的级联结构，Interleaved (I1) 布局在每一层都进行局部与全局的交互。编码器共 6 层，每层包含以下三个步骤：
+我们采用性能最佳的 Interleaved (I1) 布局，共堆叠 6 层。每一层均包含完整的“局部-全局”交互流程：
 
 \subsubsection{Segment-wise Encoder (SWE)}
-对每个 Segment 独立进行 Self-Attention，捕捉局部语义。输入形状 $H \in \mathbb{R}^{B \times N \times (K+1) \times D}$：
+捕捉局部语义。输入 $H \in \mathbb{R}^{B \times N \times (K+1) \times D}$，将 $B$ 和 $N$ 维度合并，对每个 Segment 独立进行标准 Transformer Self-Attention：
 \begin{equation}
-    H_{sw} = \text{TransformerBlock}_{shared}(H)
+    H_{sw} = \text{TransformerBlock}_{local}(H)
 \end{equation}
 
 \subsubsection{Cross-segment Encoder (CSE)}
-提取每个 Segment 的 `CLS` 向量，加上段级位置编码 $E_{pos\_cs}$ 后，在 $N$ 个段向量之间进行 Self-Attention：
+捕捉全局文档上下文。提取每个 Segment 的 \texttt{[CLS\_SEG]} 向量，加上段级位置编码 $E_{pos\_cs}$ 后，在 $N$ 个段向量之间进行 Self-Attention：
 \begin{equation}
-    CLS_{out} = \text{TransformerBlock}(CLS_{in} + E_{pos\_cs})
+    CLS_{out} = \text{TransformerBlock}_{global}(CLS_{extracted} + E_{pos\_cs})
 \end{equation}
-这一步实现了跨段落的全局信息交互。
+此步骤实现了段落间的信息流动。
 
 \subsubsection{全局信息回注 (Information Injection)}
-这是 Interleaved 结构的关键。将 CSE 更新后的全局段向量 $CLS_{out}$ 通过投影层 $W_g$ 映射后，广播（Broadcast）并加回到该段内的所有 Token 上：
+这是 Interleaved 结构的核心。将 CSE 更新后的全局段向量 $CLS_{out}$ 通过投影层 $W_g$ 映射后，\textbf{广播并加回}到该段内的所有 Token 上：
 \begin{equation}
     H_{next}[i, j] = H_{sw}[i, j] + W_g \cdot CLS_{out}[i]
 \end{equation}
-这使得底层的 Token 表示也能实时感知到文档级的全局上下文。
+这使得底层的 Token 表示在每一层都能实时感知到文档级的全局上下文，避免了传统 Hierarchical 模型“先局部后全局”导致的信息割裂。
 
-\subsection{分类头与超参}
-最终使用最后一层的段向量均值作为文档表示 $h_{doc}$，通过 LayerNorm 和 Dropout 后输入线性层分类。
-模型核心超参如下：$d_{model}=768$, $d_{ff}=3072$, $n_{heads}=12$, Layers=6 (SWE+CSE), 总参数量 $\approx 100M$。这种配置在保证长文处理能力的同时，与 BERT-Base 规模相当，训练与推理效率极高。
+\subsection{文档分类头}
+经过 6 层编码后，我们对所有 Segment 的 \texttt{[CLS\_SEG]} 进行 Masked Mean Pooling 得到文档表示 $h_{doc}$，通过 LayerNorm 和 Dropout 后输入线性层进行 14 分类。
+
+\subsection{模型配置总结}
+\begin{table}[h]
+    \centering
+    \small
+    \begin{tabular}{ll|ll}
+        \toprule
+        \textbf{参数} & \textbf{数值} & \textbf{参数} & \textbf{数值} \\
+        \midrule
+        Vocab Size & 7,555 & Layers (SWE+CSE) & 6 \\
+        Hidden Size & 768 & Segment Length & 512 \\
+        Heads & 12 & Max Segments & 8 \\
+        FFN Size & 3072 & Max Context & 4096 \\
+        \textbf{总参数量} & \textbf{$\approx$ 95M} & \textbf{结构布局} & \textbf{Interleaved} \\
+        \bottomrule
+    \end{tabular}
+    \caption{HAT-Interleaved-512 模型详细配置}
+\end{table}
 
 \section{训练与调优}
 
