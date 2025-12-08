@@ -174,6 +174,13 @@
     \item \textbf{文档分类头 (Document Classifier)}：聚合段向量输出 14 类 Logits。
 \end{enumerate}
 
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.85\textwidth]{../report/graph/model.jpg}
+\caption{模型总体架构图}
+\label{fig:batch_memory}
+\end{figure}
+
 \subsection{动态分段器 (Dynamic Segmenter)}
 分段操作集成在 \texttt{HATDataset} 中动态进行。给定重映射后的序列 $x$，目标是将其切分为 $N$ 个长度为 $K=512$ 的 Segment，且总长度控制在 4096 以内（即 $N \le 8$）。
 
@@ -234,6 +241,7 @@
 \begin{table}[h]
     \centering
     \small
+    \caption{HAT-Interleaved-512 模型详细配置}
     \begin{tabular}{ll|ll}
         \toprule
         \textbf{参数} & \textbf{数值} & \textbf{参数} & \textbf{数值} \\
@@ -245,7 +253,6 @@
         \textbf{总参数量} & \textbf{$\approx$ 95M} & \textbf{结构布局} & \textbf{Interleaved} \\
         \bottomrule
     \end{tabular}
-    \caption{HAT-Interleaved-512 模型详细配置}
 \end{table}
 
 \section{训练与调优}
@@ -277,6 +284,7 @@
 \begin{table}[h]
     \centering
     \small
+    \caption{MLM 训练验证集指标}\label{tab:mlm_metrics}
     \begin{tabular}{cccc}
         \hline
         \textbf{Step} & \textbf{Val Loss} & \textbf{Val PPL} & \textbf{备注} \\
@@ -291,7 +299,6 @@
         12000 & \textbf{2.41} & \textbf{11.08} & 最终 / 最佳 \\
         \hline
     \end{tabular}
-    \caption{MLM 训练验证集指标}\label{tab:mlm_metrics}
 \end{table}
 
 从表~\ref{tab:mlm_metrics} 可以看出，验证指标从 Step 200 的 PPL 5064 快速下降到 Step 12000 的 11.08，全程未出现反弹；
@@ -320,6 +327,7 @@
 \begin{table}[h]
     \centering
     \small
+    \caption{Stage1 K 折验证最佳分数}\label{tab:stage1_metrics}
     \begin{tabular}{ccc}
         \hline
         \textbf{Fold} & \textbf{Best Val Macro-F1} & \textbf{Checkpoint} \\
@@ -333,7 +341,6 @@
         \textbf{均值} & \textbf{0.9602 ± 0.0019} & 存于 \texttt{checkpoints/cls\_hat512\_kfold} \\
         \hline
     \end{tabular}
-    \caption{Stage1 K 折验证最佳分数}\label{tab:stage1_metrics}
 \end{table}
 
 从表~\ref{tab:stage1_metrics} 可以看出，K 折训练共耗时约 946 分钟，各折最佳模型均由 EMA 权重获得，后续推理直接集成以上 5 个 checkpoint。
@@ -355,6 +362,7 @@
 \begin{table}[h]
     \centering
     \small
+    \caption{Stage2 K 折部分微调结果}\label{tab:stage2_metrics}
     \begin{tabular}{cccc}
         \hline
         \textbf{Fold} & \textbf{Stage2 最佳 F1} & \textbf{Stage1 最佳 F1} & \textbf{是否超过} \\
@@ -364,7 +372,6 @@
         3 & 0.9565 & 0.9609 & 否 \\
         \hline
     \end{tabular}
-    \caption{Stage2 K 折部分微调结果}\label{tab:stage2_metrics}
 \end{table}
 
 从表~\ref{tab:stage2_metrics} 可以看出，整体上 Stage2 未能超越 Stage1，且作业在 Fold 3 的第 2 个 epoch 途中被取消，后续折未运行；最终推理继续沿用 Stage1 的 5 个折模型。
