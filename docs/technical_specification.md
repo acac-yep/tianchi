@@ -389,3 +389,47 @@ src/data_preprocess/config.py    src/model/hat_model.py
 7. **MLM labels 形状**：外部提供 `[B, N, K]`，模型内部 pad 为 `[B, N, K+1]`
 8. **空文档**：在数据清洗阶段移除，segmenter 的空文档处理仅为防御性代码
 9. **预处理输出**：预处理后的 CSV 文件保存的是完整文本（重映射后），长度可能超过 4096 tokens，分段在训练时处理
+
+---
+
+## 8. 训练与调优
+
+### 8.1 MLM 预训练（Stage0，可选但推荐）
+- 脚本：`scripts/mlm_train.py`，数据源为预处理后的 `train.csv`（默认 9:1 划分训练/验证）。
+- 关键超参：`batch_size=4`、`lr=5e-5`、`warmup_ratio=0.06`（或 `warmup_steps`）、`max_steps=10000`、`weight_decay=0.01`、`grad_clip=1.0`、`mlm_probability=0.15`，默认启用 `EMA=0.999`，可选 `AMP`。
+- 形状约定：外部 batch `[B,N,K]`（不含 CLS），模型内部补 `CLS_SEG` 得到 `[B,N,K+1]` 并自动对齐 `mlm_labels`。
+- 产物：`hat_mlm_final.pt`、`best_model.pt`（基于验证 loss / perplexity），兼容后续分类加载。
+- 报告指标：验证 PPL 从 5064 → 11.08（Step 12k），全程无反弹。
+
+### 8.2 分类训练 Stage1（主力方案）
+- 脚本：`scripts/cls_train_kfold.py`，默认 Stratified K-Fold=5，种子 42。
+- 模型：`HATInterleaved512ForClassification`，可加载 MLM 权重；输入保持 `[B,N,K]`，模型内部补 `CLS_SEG`。
+- 损失：`ce` / `smooth`（默认 label_smoothing=0.05）/ `focal` / `focal_smooth`，类别权重来自 `class_weights.npy`；可选 `WeightedRandomSampler`，避免与损失权重叠加。
+- 优化：`AdamW(lr=3e-5, weight_decay=0.01, betas=(0.9,0.999), eps=1e-8)`，`warmup_ratio=0.06`，`grad_clip=1.0`；可选 `AMP`、`EMA(0.9999)`、`early_stopping`。
+- 批次：`batch_size=64`（H800 建议 64~128），`eval_batch_size=128`，`num_epochs=5`。
+- 产物：`hat_cls_fold{k}_best.pt`（每折以宏 F1 选优）。报告实测均值 `0.9602 ± 0.0019`，共约 946 分钟。
+
+### 8.3 分类训练 Stage2（可选微调）
+- 脚本：`scripts/cls_train_kfold_stage2.py`，在 Stage1 权重上小学习率再训练，若 `Stage2 F1 ≥ Stage1` 才写 `hat_cls_fold{k}_stage2_best.pt`，否则回退 Stage1。
+- 超参：`lr=1e-5`，`warmup_ratio=0.05`，`num_epochs=1~2`，`batch_size≈64`，`grad_clip=1.0`，可选 `AMP`、`EMA(0.9999)`。
+- 正则/增强：随机滑窗起点（token 偏移，默认 stride=128）、可选 `R-Drop (λ=0.5)`、`FGM (ε=0.5, ratio=1.0)`。
+- 结果：报告中 Stage2 未稳定超越 Stage1，默认推理仍使用 Stage1 模型。
+
+---
+
+## 9. 推理与部署
+
+- 单/多模型：`scripts/infer.py` 支持 `--window-agg [mean|max|mean_conf]`、`--model-agg [logits_avg|prob_avg|voting|logits_avg_weighted|prob_avg_weighted]`、`--window-tta-offsets`、`--mc-dropout-runs`、阈值调节（统一阈值或逐类阈值）和 logits 持久化。
+- K-Fold 集成：`scripts/infer_kfold.py` 自动扫描目录，优先 `hat_cls_fold*_stage2_best.pt`，缺失时回退 `hat_cls_fold*_best.pt`，并按需以 `torchrun --nproc-per-node` 启动多 GPU。
+- 聚合顺序：窗口级聚合 → 模型级聚合 → 写出 `outputs/submission/*.csv`（可同时保存 logits）。
+- 形状：保持 `[B,N,K]` 输入，segmenter 在推理侧可滑窗分段；模型内部补 `CLS_SEG`、扩展 mask 对齐。
+
+---
+
+## 10. 代码与文档映射
+
+- 公共超参：`src/common_config.py`（唯一真相来源，对齐 vocab/长度/类别数）。
+- 预处理：`scripts/run_preprocessing.py` → `src/data_preprocess/preprocess.py`；分词/分段/数据集在 `tokenizer.py`、`segmenter.py`、`dataset.py`，类别平衡在 `class_balance.py`。
+- 模型：`src/model/hat_model.py`（分类）、`src/model/hat_pretrain.py`（MLM）；损失函数 `src/losses.py`。
+- 训练/推理脚本：`scripts/mlm_train.py`、`scripts/cls_train*.py`、`scripts/infer*.py`；集群模板见 `scripts/slurm_scripts/`。
+- 报告参考：`report/report.tex`（实验过程与结果），本技术规格与报告保持一致。
