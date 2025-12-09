@@ -24,8 +24,8 @@
     stringstyle=\color{red}
 }
 
-\title{\textbf{NLP新闻分类学习赛\\实验报告}}
-\author{\textbf{队伍名：Attention请注意我} \\ 郑亦航 PB23111 \\ 李梓煊 PB23111709}
+\title{\textbf{阿里天池赛：NLP新闻分类学习赛\\实验报告}}
+\author{ 郑亦航 PB23111612 \\ 李梓煊 PB23111709}
 \date{\today}
 
 
@@ -35,7 +35,8 @@
 \maketitle
 
 \begin{abstract}
-本队在 NLP 新闻分类学习赛中以准确率 0.962 获得第 3 名，成绩排名截图已置于文末附录以供查阅。
+本队伍在 NLP 新闻分类学习赛中以准确率 0.962 获得第 3 名，
+成绩排名截图已置于文末附录以供证明（时间截止到 2025 年 12 月 5 日）。
 \end{abstract}
 
 \section{团队成员与分工}
@@ -53,15 +54,15 @@
     \item \textbf{李梓煊}（后端：训练与部署优化）
     \begin{itemize}
         \item 实现 MLM 预训练流程，完成与数据管线、Tokenizer/ID 偏移的对接与适配，保证长文本场景下的稳定训练。
-        \item 优化分类训练流程，覆盖梯度累积、混合精度训练、学习率调度等环节，在长文本场景下提升收敛速度与性能。
+        \item 优化分类训练流程，覆盖混合精度训练、超参数调整等环节，在长文本场景下提升收敛速度与性能。
         \item 负责第二阶段微调，设计与调整损失函数（如不同 Loss 组合）。
-        \item 实现推理部署：基于 K-fold，将各折最佳 HAT 模型用于长文档滑窗前向与窗口聚合，在此基础上进行多模型加权集成，输出最终预测结果。
+        \item 实现推理部署，基于 K-fold，将各折最佳 HAT 模型用于长文档滑窗前向与窗口聚合，在此基础上进行多模型加权集成，输出最终预测结果。
     \end{itemize}
 \end{itemize}
 
 \section{问题定义}
 
-本次比赛的任务是“新闻文本分类”。
+本次比赛的任务是“新闻文本分类”，赛题数据为新闻文本，并按照字符级别进行匿名处理，整合划分出14个候选分类类别。
 \begin{itemize}
     \item \textbf{输入}：匿名处理后的字符 ID 序列（空格分隔），代表一篇新闻文本。数据经过脱敏处理，无法直接看到原始汉字。
     \item \textbf{输出}：将文本分类到 14 个类别之一（如财经、体育、娱乐等），对应的 Label ID 为 0-13。
@@ -69,9 +70,9 @@
     \begin{enumerate}
         \item \textbf{长文本结构复杂性}：许多样本长度远超 BERT 模型的 512 token 限制（部分达到 40,000+ token），且关键信息在文本中分布稀疏、跨段依赖长，分段式编码容易遗漏关键语义。
         \item \textbf{文本风格与领域差异}：数据来源多样，风格从新闻报道到口语评论均有，语气、表达与话题差异显著，使模型难以学习统一、稳健的特征表示。
-        \item \textbf{类别极度不平衡}：训练集中类别数量分布长尾明显，最大与最小类别比例高达 43:1，模型在标准训练中容易偏向头部类别。
-        \item \textbf{数据噪声显著}：存在空文本、重复文本、标签冲突、低质量内容等多种噪声，会影响训练稳定性并降低模型泛化能力。
-        \item \textbf{计算资源与模型容量限制}：长文本 + 大规模模型导致显存压力大，限制可使用的 batch size、对抗训练策略及模型规模，使训练不够充分。
+        \item \textbf{类别极度不平衡}：在数据特征分析中发现，训练集中类别数量分布长尾明显，最大与最小类别比例高达 43:1，模型在标准训练中容易偏向头部类别。
+        \item \textbf{数据噪声显著}：数据特征分析发现存在空文本、重复文本、标签冲突、低质量内容等多种噪声，会影响训练稳定性并降低模型泛化能力。
+        \item \textbf{计算资源与模型容量限制}：长文本导致显存压力大，限制可使用的 batch size、对抗训练策略及模型规模，使训练不够充分。
     \end{enumerate}
 \end{itemize}
 
@@ -86,7 +87,8 @@
 分析结果显示，本任务为 14 类单标签分类任务，类别分布呈现极度长尾特征。
 \begin{itemize}
     \item \textbf{极端不平衡}：最大类别（Label 0）拥有 38,918 条样本，而最小类别（Label 13）仅 908 条。最大最小比（Imbalance Ratio）高达 \textbf{43:1}。
-    \item \textbf{策略启示}：如此悬殊的比例要求我们在 Loss 设计上引入类别平衡手段（如 Class Weighting 或 Focal Loss），否则模型将过度偏向样本量多的头部类别。
+    \item \textbf{策略启示}：如此悬殊的比例要求我们在 Loss 设计上引入类别平衡手段
+    （如 Class Weighting 与 Focal Loss），否则模型将过度偏向样本量多的头部类别。
 \end{itemize}
 
 \subsubsection{文本长度统计}
@@ -110,7 +112,7 @@
     \item \textbf{OOV 情况}：测试集中未登录词（OOV）的比例极低（仅占 token 总数的 0.0004\%），表明词表覆盖十分全面。
 \end{itemize}
 
-\subsection{预处理流水线}
+\subsection{数据预处理流水线}
 
 基于上述分析，我们设计了一条轻量级的预处理流水线。值得强调，\textbf{此阶段并不进行文档分段（Segmentation）}，预处理仅负责清洗和标准化，分段逻辑交由模型输入层动态完成，以支持数据增强。
 
@@ -121,14 +123,10 @@
     t' = t_{\text{raw}} + 5, \quad t_{\text{raw}} \in [0, 7549] \rightarrow t' \in [5, 7554]
 \end{equation}
 腾出的 [0, 4] ID 区间作如下保留，最终词表大小为 7,555：
-\begin{itemize}
-    \item 0: \texttt{[PAD]}
-    \item 1: \texttt{[UNK]}
-    \item 2: \texttt{[CLS\_SEG]}（用于段级聚合）
-    \item 3: \texttt{[SEP]}
-    \item 4: \texttt{[MASK]}（用于预训练）
-\end{itemize}
 
+0:\texttt{[PAD]}，1: \texttt{[UNK]}，2: \texttt{[CLS\_SEG]}，3: \texttt{[SEP]}，4: \texttt{[MASK]}
+
+其中 2 用于段级聚合，5 用于预训练
 \subsubsection{数据清洗}
 
 我们进行了严格的数据清洗：
@@ -142,10 +140,10 @@
 
 \subsection{设计目标与约束}
 
-本赛题的核心是在有限的算力和时间内处理大规模长文本分类问题。我们的方案决策基于以下关键约束：
+本赛题的核心是在有限的算力和时间内处理大规模长文本分类问题，因此，我们的方案决策基于以下关键约束：
 \begin{itemize}
-    \item \textbf{数据约束}：共有 20 万样本，约 2 亿 token。由于数据为匿名 ID，无法利用现有预训练模型（如 BERT/LLaMA）的语义知识，必须\textbf{从零开始预训练}模型。
-    \item \textbf{算力约束}：可用硬件为 4 卡 H800 GPU，预训练时间窗口约为 24 小时。
+    \item \textbf{模型约束}：共有 20 万样本，约 2 亿 token。由于数据为匿名 ID，无法利用现有预训练模型（如 BERT/LLaMA）的语义知识，必须\textbf{从零开始预训练}模型。
+    \item \textbf{数据约束}：20 万样本量较小，不能使用太大参数量的模型
     \item \textbf{长度约束}：需有效处理 4096 长度的上下文，且不能像截断 BERT 那样丢弃文本尾部的关键信息。
 \end{itemize}
 
@@ -233,14 +231,14 @@
 
 \subsubsection{Segment-wise Encoder (SWE)}
 
-局部语义编码。将输入张量 $H \in \mathbb{R}^{B \times N \times (K+1) \times D}$ 在 $B$ 和 $N$ 维度展平，对每个 Segment 独立执行标准 Transformer 的 Self-Attention 计算：
+局部语义编码：将输入张量 $H \in \mathbb{R}^{B \times N \times (K+1) \times D}$ 在 $B$ 和 $N$ 维度展平，对每个 Segment 独立执行标准 Transformer 的 Self-Attention 计算：
 \begin{equation}
     H_{\text{sw}} = \text{TransformerBlock}_{\text{local}}(H)
 \end{equation}
 
 \subsubsection{Cross-segment Encoder (CSE)}
 
-全局语境编码。从 $H_{\text{sw}}$ 中提取每个 Segment 的 \texttt{[CLS\_SEG]} 向量，加入段级位置编码 $E_{\text{pos\_cs}}$ 后，在 $N$ 个段向量之间执行 Self-Attention：
+全局语境编码：从 $H_{\text{sw}}$ 中提取每个 Segment 的 \texttt{[CLS\_SEG]} 向量，加入段级位置编码 $E_{\text{pos\_cs}}$ 后，在 $N$ 个段向量之间执行 Self-Attention：
 \begin{equation}
     CLS_{\text{out}} = \text{TransformerBlock}_{\text{global}}(CLS_{\text{extracted}} + E_{\text{pos\_cs}})
 \end{equation}
@@ -272,10 +270,10 @@
         Hidden Size & 768 & Segment Length & 512 \\
         Heads & 12 & Max Segments & 8 \\
         FFN Size & 3072 & Max Context & 4096 \\
-        \textbf{总参数量} & \textbf{$\approx$ 95M} & \textbf{结构布局} & \textbf{Interleaved} \\
         \bottomrule
     \end{tabular}
 \end{table}
+模型配置如表~所示，模型参数大小约为95M
 
 \section{训练与调优}
 
@@ -287,16 +285,16 @@
 
 \begin{itemize}
     \item 我们使用预处理后的训练数据集，随机打乱后按 9:1 划分为训练集和验证集。
-    \item 将每篇长文档切分为最多 $N$ 个片段，每段长度固定为 $K=512$，以尽可能覆盖全文。
+    \item 每篇长文档切分为最多$N$个片段，每段长度固定为 $K=512$，尽可能覆盖全文。
     \item 我们以 15\% 的概率将部分 token 进行 Mask，并对输入和标签进行 padding，以对齐批处理的形状。
 \end{itemize}
 
 \paragraph{技术手段}
 
-预训练阶段，我们基于 HAT-MLM 架构，结合 AdamW 优化器、线性 warmup + 学习率衰减、EMA 等技术，构建了一条稳定可复现的预训练流程，主要配置如下：
+预训练阶段，我们基于 HAT-MLM 架构，结合 AdamW 优化器、线性 warmup 与学习率衰减、EMA 等技术，构建了一条稳定可复现的预训练流程，主要配置如下：
 \begin{itemize}
     \item 模型采用 HAT-MLM 架构，默认 batch size 为 4，总训练步数约 10000 步。数据读入并打乱后按 9:1 划分训练集和验证集。
-    \item 优化器为 AdamW，初始学习率 5e-5，权重衰减 0.01，$\texttt{betas}=(0.9, 0.999)$，$\texttt{eps}=1\text{e-}8$，反向传播中使用梯度裁剪（阈值 1.0）。
+    \item 优化器为 AdamW，初始学习率为 5e-5，权重衰减 0.01，$\texttt{betas}=(0.9, 0.999)$，$\texttt{eps}=1\text{e-}8$，并且在反向传播中使用梯度裁剪（阈值 1.0）。
     \item 学习率策略：前 6\% 训练步数线性 warmup，随后线性衰减至 0。
     \item 为提高训练稳定性，启用 EMA（指数滑动平均，衰减系数 0.999）。
 \end{itemize}
