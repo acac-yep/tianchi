@@ -282,7 +282,7 @@
 
 在正式进行分类任务前，我们先利用 Masked Language Modeling（MLM）在新闻语料上进行预训练，让模型预先学习领域语义分布。
 
-\paragraph{设置与流程}
+\subsubsection{设置与流程}
 
 \begin{itemize}
     \item 我们使用预处理后的训练数据集，随机打乱后按 9:1 划分为训练集和验证集。
@@ -290,7 +290,7 @@
     \item 我们以 15\% 的概率将部分 token 进行 Mask，并对输入和标签进行 padding，以对齐批处理的形状。
 \end{itemize}
 
-\paragraph{技术手段}
+\subsubsection{技术手段}
 
 预训练阶段，我们基于 HAT-MLM 架构，结合 AdamW 优化器、线性 warmup 与学习率衰减、EMA 等技术，构建了一条稳定可复现的预训练流程，主要配置如下：
 \begin{itemize}
@@ -300,7 +300,7 @@
     \item 为提高训练稳定性，启用 EMA（指数滑动平均，衰减系数 0.999）。
 \end{itemize}
 
-\paragraph{训练效果}
+\subsubsection{训练效果}
 
 \begin{table}[h]
     \centering
@@ -326,16 +326,17 @@
 
 \subsection{分类模型训练（Stage1）}
 
-\paragraph{整体流程}
+\subsubsection{整体流程}
 
 分类阶段我们采用分层 K 折交叉验证，默认使用分层 5 折（Stratified K-Fold，随机种子 42）。在保证各折标签分布大致均衡的前提下，依次训练并保存每一折的最佳模型，供后续推理集成使用。
 
-\paragraph{数据与模型}
+\subsubsection{数据与模型}
 
 使用预处理后的新闻文本及其标签作为训练语料。对于每篇长文档，按固定长度将其切分成若干片段，
 并在批处理阶段打包成形状为 \([B,N,K]\) 的张量输入模型。
-分类模型基于 HAT 架构实现，内部会自动添加 \texttt{[CLS\_SEG]} 标记并输出文档级 logits
-\paragraph{损失函数与优化策略}
+分类模型基于 HAT 架构实现，内部会自动添加 \texttt{[CLS\_SEG]} 标记并输出文档级 logits。
+
+\subsubsection{损失函数与优化策略}
 
 训练过程中综合使用了多种分类损失，包括交叉熵、标签平滑以及 Focal Loss 。默认标签平滑系数为 0.05，Focal Loss 的 $\gamma=2.0$，并结合预先计算的类别权重以及可选的样本加权采样，以缓解类别不平衡。batch size 默认为 64（训练）和 128（验证），反向传播阶段采用梯度裁剪（阈值 1.0）。
 
@@ -343,7 +344,7 @@
 
 为兼顾效率与稳定性，我们启用了 AMP 混合精度训练以及 EMA（衰减系数 0.9999）移动平均，验证时使用 EMA 权重进行评估。训练日志按 step 记录，每折使用独立随机种子，保证结果可稳定复现，便于后续集成各折最佳 checkpoint。
 
-\paragraph{验证与模型选择}
+\subsubsection{验证与模型选择}
 
 每个 epoch 结束后，我们在当前折的验证集上评估 Loss、准确率和 Macro-F1，选取 Macro-F1 最高的模型作为该折的最佳模型；同时采用 early stopping，如果验证指标若干轮未提升则提前终止训练，防止过拟合并节约计算资源。
 
@@ -370,11 +371,11 @@
 
 \subsection{第二阶段微调（Stage2）}
 
-\paragraph{动机与设定}
+\subsubsection{动机与设定}
 
 在第一阶段训练基础上，我们尝试对每折的最佳模型进行小学习率的二次微调，希望通过更强的正则化和轻量数据增强进一步提升性能。
 
-\paragraph{训练设置}
+\subsubsection{训练设置}
 
 \begin{itemize}
     \item 继续使用相同的 5 折数据划分，以各折 Stage1 最佳模型 (\texttt{hat\_cls\_fold\{k\}\_best.pt}) 作为初始权重。
@@ -382,7 +383,7 @@
     \item 仅在训练阶段随机调整滑窗起点（token 级偏移），增加长文档训练的“视角多样性”，并可选用 R-Drop、FGM 等正则化手段提升泛化能力。
 \end{itemize}
 
-\paragraph{结果与分析}
+\subsubsection{结果与分析}
 
 在实际实验中，如表~\ref{tab:stage2_metrics} 所示，Stage2 的 Macro-F1 相较 Stage1 整体提升不明显，部分折甚至略有下降。最终提交结果中我们仍采用 Stage1 权重进行推理。初步分析原因包括：
 
