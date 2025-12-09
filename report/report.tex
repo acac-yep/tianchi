@@ -159,13 +159,13 @@
         \toprule
         \textbf{架构方案} & \textbf{优势} & \textbf{劣势} \\
         \midrule
-        \textbf{大语言模型} \newline (LLaMA/Qwen 等) & 强大的生成能力与 few-shot 学习能力。 & 参数量庞大（7B+），需海量数据从零训练，区区 2 亿 token 容易导致过拟合；训练代价高昂。 \\
+        \textbf{大语言模型} \newline (LLaMA/Qwen 等) & 强大的生成能力与 few-shot 学习能力。 & 参数量庞大，需海量数据从零训练，容易导致过拟合；训练代价高昂。 \\
         \midrule
-        \textbf{截断版 BERT} \newline (Max Len 512) & 训练速度快，基础完善。 & 丢失 50\% 以上的信息（尤其是新闻/法律文本的尾部结论），性能上限受限。 \\
+        \textbf{截断版 BERT} \newline (Max Len 512) & 训练速度快，参数量较少，基础完善。 & 丢失 50\% 以上的信息，性能上限受限。 \\
         \midrule
-        \textbf{稀疏 Transformer} \newline (Longformer/BigBird) & 原生支持长上下文，复杂度 $O(N)$。 & 需自定义 CUDA Kernel 或复杂实现；在 4k 长度下显存优势不明显。 \\
+        \textbf{稀疏 Transformer} \newline (Longformer/BigBird) & 原生支持长上下文，复杂度 $O(N)$；更适合处理长文任务。 & 需自定义 CUDA Kernel 或复杂实现；在 4k 长度下显存优势不明显。 \\
         \midrule
-        \textbf{层次化 Transformer} \newline (HAT/HDT) & \textbf{性价比最高}：段内标准 Attention 提取特征，段间聚合提供全局视野；显存占用低。 & 需要定制分层结构（段内注意力 + 跨段注意力）。 \\
+        \textbf{层次化 Transformer} \newline (HAT/HDT) & 段内注意力提取特征，段间聚合提供全局视野；显存占用低。 & 需要定制分层结构（段内注意力结合跨段注意力）。 \\
         \bottomrule
     \end{tabular}
     \label{tab:model_comparison}
